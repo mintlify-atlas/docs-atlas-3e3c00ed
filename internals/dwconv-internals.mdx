@@ -1,0 +1,266 @@
+---
+title: "Depthwise Convolution Microkernel Internals"
+description: "How XNNPACK's depthwise convolution (DWCONV) microkernels work: channel and kernel tiles, the main and remainder loops, weight packing, and the indirection buffer."
+---
+
+Depthwise convolution applies a separate filter to each input channel independently — there are no cross-channel dot products. XNNPACK implements depthwise convolution through a family of `dwconv` microkernels that are structured to exploit this independence and keep memory access patterns cache-friendly.
+
+All depthwise convolution microkernels live in `src/*-dwconv/`, for example [`src/f32-dwconv/`](https://github.com/google/XNNPACK/tree/master/src/f32-dwconv). The simplest reference implementation to read is `src/f32-dwconv/gen/f32-dwconv-3p2c-minmax-scalar.c`.
+
+## Key parameters
+
+Before diving in, two parameters govern every DWCONV microkernel:
+
+| Parameter | Description |
+|---|---|
+| **Channel tile** (`C`) | Number of channels processed per iteration of the main loop. Chosen to fill one SIMD register (e.g., 4 for SSE, 8 for AVX, 16 for AVX-512). |
+| **Kernel tile** (`K`) | Number of kernel elements (filter taps) read per output element. Can be larger than the actual kernel size to allow over-reading for alignment. |
+
+These values are encoded in the kernel name. For example, `9p4c` means kernel tile = 9, channel tile = 4.
+
+## High-level structure
+
+Each call to a DWCONV microkernel produces **one full row of output**. The caller loops over output rows and invokes the microkernel once per row.
+
+Within a single call, the microkernel iterates over:
+
+1. **Output width** — each pixel in the output row
+2. **Channels** — in two phases: main loop and remainder loop
+
+```
+for each output pixel in output_width:
+    main loop:      process channel_tile channels at a time
+    remainder loop: process remaining channels one at a time
+```
+
+### Main loop
+
+In each main-loop iteration the microkernel:
+
+1. Reads `channel_tile` bias values
+2. Reads `channel_tile × kernel_tile` input values (via the indirection buffer)
+3. Reads `channel_tile × kernel_tile` weight values
+4. Optionally reads `channel_tile` per-channel scales (for quantized variants)
+5. Computes the convolution (multiply-accumulate for each kernel element)
+6. Writes `channel_tile` output values
+
+### Remainder loop
+
+After the main loop, the remainder loop processes channels that don't fill a complete tile, one channel at a time.
+
+## Microkernel signature
+
+```c
+void xnn_f32_dwconv_minmax_ukernel_3p2c__scalar(
+    size_t channels,          // number of output channels to compute
+    size_t output_width,      // number of output pixels to produce
+    const float** input,      // pointer into the indirection buffer
+    const float* weights,     // packed weights (biases first, then weights)
+    float* output,            // pointer to output buffer
+    intptr_t input_stride,    // bytes to advance indirection buffer per output pixel
+    size_t output_increment,  // bytes to advance output pointer per output pixel
+    size_t input_offset,      // offset added to indirection pointers (for compression)
+    size_t input_pixel_stride,// bytes to advance input_offset per output pixel
+    const float* zero,        // pointer to a zero-filled buffer (for padding)
+    const struct xnn_f32_minmax_params* restrict params)
+```
+
+| Parameter | Description |
+|---|---|
+| `channels` | Total number of channels to process (may be any positive integer) |
+| `output_width` | Number of output pixels in the row |
+| `input` | Pointer to the start of the indirection buffer for this output row |
+| `weights` | Packed weight buffer (see Packing section below) |
+| `output` | Output buffer |
+| `input_stride` | Bytes to add to `input` per output pixel step |
+| `output_increment` | Bytes to add to `output` after each pixel (for non-contiguous layouts) |
+| `input_offset` | Constant offset added to each indirection pointer (see Compression) |
+| `input_pixel_stride` | How much `input_offset` changes per output pixel |
+| `zero` | Points to a buffer of zeros; indirection pointers set to `zero` signal padding |
+| `params` | Min/max clamp values |
+
+### Generated scalar implementation
+
+The following is the actual generated code for `xnn_f32_dwconv_minmax_ukernel_3p2c__scalar` (kernel tile = 3, channel tile = 2):
+
+```c
+void xnn_f32_dwconv_minmax_ukernel_3p2c__scalar(
+    size_t channels,
+    size_t output_width,
+    const float** input,
+    const float* weights,
+    float* output,
+    intptr_t input_stride,
+    size_t output_increment,
+    size_t input_offset,
+    size_t input_pixel_stride,
+    const float* zero,
+    const struct xnn_f32_minmax_params* restrict params)
+{
+  const float vmin = params->scalar.min;
+  const float vmax = params->scalar.max;
+  do {
+    // Load kernel_tile (3) input pointers from indirection buffer
+    const float* i0 = input[0];
+    if XNN_UNPREDICTABLE(i0 != zero) {
+      i0 = (const float*) ((uintptr_t) i0 + input_offset);
+    }
+    const float* i1 = input[1];
+    if XNN_UNPREDICTABLE(i1 != zero) {
+      i1 = (const float*) ((uintptr_t) i1 + input_offset);
+    }
+    const float* i2 = input[2];
+    if XNN_UNPREDICTABLE(i2 != zero) {
+      i2 = (const float*) ((uintptr_t) i2 + input_offset);
+    }
+    input = (const float**) ((uintptr_t) input + input_stride);
+
+    size_t c = channels;
+    const float* w = weights;
+
+    // Main loop: process 2 channels at a time
+    for (; c >= 2; c -= 2) {
+      float vacc0p0 = w[0];   // bias for channel 0
+      float vacc1p0 = w[1];   // bias for channel 1
+
+      const float vi0x0 = i0[0]; const float vi0x1 = i0[1]; i0 += 2;
+      const float vk0x0 = w[2];
+      vacc0p0 = math_muladd_f32(vi0x0, vk0x0, vacc0p0);
+      const float vk0x1 = w[3];
+      vacc1p0 = math_muladd_f32(vi0x1, vk0x1, vacc1p0);
+
+      const float vi1x0 = i1[0]; const float vi1x1 = i1[1]; i1 += 2;
+      const float vk1x0 = w[4];
+      vacc0p0 = math_muladd_f32(vi1x0, vk1x0, vacc0p0);
+      const float vk1x1 = w[5];
+      vacc1p0 = math_muladd_f32(vi1x1, vk1x1, vacc1p0);
+
+      const float vi2x0 = i2[0]; const float vi2x1 = i2[1]; i2 += 2;
+      const float vk2x0 = w[6];
+      vacc0p0 = math_muladd_f32(vi2x0, vk2x0, vacc0p0);
+      const float vk2x1 = w[7];
+      vacc1p0 = math_muladd_f32(vi2x1, vk2x1, vacc1p0);
+
+      w += 8;  // (kernel_tile + 1) * channel_tile = (3+1)*2 = 8
+
+      // Clamp and store
+      float vacc0 = math_max_f32(vacc0p0, vmin);
+      float vacc1 = math_max_f32(vacc1p0, vmin);
+      vacc0 = math_min_f32(vacc0, vmax);
+      vacc1 = math_min_f32(vacc1, vmax);
+      output[0] = vacc0;
+      output[1] = vacc1;
+      output += 2;
+    }
+
+    // Remainder loop: one channel at a time
+    for (; c >= 1; c -= 1) {
+      float vacc0p0 = *w++;
+      const float vi0 = *i0++;
+      vacc0p0 = math_muladd_f32(vi0, w[1], vacc0p0);
+      const float vi1 = *i1++;
+      vacc0p0 = math_muladd_f32(vi1, w[3], vacc0p0);
+      const float vi2 = *i2++;
+      vacc0p0 = math_muladd_f32(vi2, w[5], vacc0p0);
+
+      float vacc0 = math_max_f32(vacc0p0, vmin);
+      vacc0 = math_min_f32(vacc0, vmax);
+      *output++ = vacc0;
+    }
+
+    input_offset += input_pixel_stride;
+    output = (float*) ((uintptr_t) output + output_increment);
+  } while (--output_width != 0);
+}
+```
+
+Notice how the zero-pointer check (`i0 != zero`) happens _before_ applying `input_offset`. This is what makes left/right padding work correctly — see the Indirection Buffer section.
+
+## Weight packing
+
+Weights must be packed into the layout that the microkernel expects. The packing produces a contiguous block of:
+
+```
+[ channel_tile biases ] [ channel_tile × kernel_tile weights ]
+```
+
+This block repeats `ceil(channels / channel_tile)` times.
+
+For the `3p2c` example (3 kernel taps, 2-channel tile):
+
+```
+Layout: [bias_ch0, bias_ch1, k0_ch0, k0_ch1, k1_ch0, k1_ch1, k2_ch0, k2_ch1]
+         └─ 2 biases ──────┘ └────── 2 × 3 = 6 kernel values ──────────────┘
+```
+
+The weights are stored in **channel-first order** within each kernel position. This means all channels for kernel tap 0, then all channels for kernel tap 1, and so on — matching the inner-loop access pattern so that consecutive weight loads are sequential in memory.
+
+## Indirection buffer
+
+Rather than reading input data directly, DWCONV reads through an **indirection buffer**: an array of pointers, where each pointer identifies the start of the input data for one kernel tap.
+
+For a 2×2 kernel operating on a 2×3 input to produce a 1×2 output:
+
+```
+input grid     kernel    output
+A B C           a b       W X
+D E F           c d       Y Z
+G H I
+```
+
+The uncompressed indirection buffer for the first output row (W, X) is:
+
+```
+[ptr→A, ptr→D, ptr→B, ptr→E, ptr→B, ptr→E, ptr→C, ptr→F]
+  k0      k2     k1     k3     k0     k2     k1     k3
+  for W               for X
+```
+
+To compute output pixel W: read i0=A, i1=D, i2=B, i3=E, convolve with kernel taps a, c, b, d.
+To compute output pixel X: read i0=B, i1=E, i2=C, i3=F, convolve similarly.
+
+The indirection buffer is constructed in **column-first order** to enable compression (see [Indirection Buffer](/internals/indirection-buffer) for full details).
+
+## Padding via the zero buffer
+
+Left and right padding is handled by setting indirection pointers that fall in the padding region to point at a shared **zero buffer** — a region of memory filled with zeros that is never written.
+
+In the microkernel, before applying `input_offset`, each input pointer is compared against `zero`:
+
+```c
+if XNN_UNPREDICTABLE(i0 != zero) {
+    i0 = (const float*) ((uintptr_t) i0 + input_offset);
+}
+```
+
+If the pointer _is_ the zero buffer, `input_offset` is _not_ added — the pointer stays pointing at zeros. This is critical for correctness with the compressed indirection buffer, where `input_offset` would otherwise compute a nonsensical address.
+
+## Multi-pass DWCONV
+
+For large kernels that cannot be handled in a single pass (because all inputs don't fit in registers), multi-pass microkernels split computation across **first**, **middle**, and **last** passes.
+
+<Steps>
+  <Step title="First pass">
+    Reads the initial `U` kernel elements, initializes accumulators from biases, and writes partial sums to a scratch buffer.
+  </Step>
+  <Step title="Middle pass (repeating)">
+    Reads the next `V` kernel elements, reads the partial sums, accumulates, and writes updated partial sums back. Repeats until only the last-pass elements remain.
+  </Step>
+  <Step title="Last pass">
+    Reads the final `W` kernel elements, reads the partial sums, accumulates, applies activation, and writes the final output.
+  </Step>
+</Steps>
+
+The multi-pass name encodes all six parameters:
+
+```text
+xnn_f32_dwconv_minmax_ukernel_<U>f<V>m<W>l<X>c<Y>s<Z>r__<arch>
+                               ↑first  ↑mid  ↑last
+                                             ↑ch_tile ↑ch_subtile ↑ch_round
+```
+
+For example: `2f3m3l4c2s4r` means first=2, middle=3, last=3, channel_tile=4, subtile=2, round=4.
+
+<Info>
+Channel tiling in multi-pass microkernels processes as many full `channel_tile` (X) tiles as possible. Remaining channels are handled in `channel_subtile` (Y) sized rounds. The `channel_round` (Z) value determines safe over-reading alignment and is related to `XNN_EXTRA_BYTES`.
+</Info>

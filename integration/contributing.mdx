@@ -1,0 +1,154 @@
+---
+title: "Contributing to XNNPACK"
+description: "How to contribute patches, microkernels, and improvements to the XNNPACK project — CLA, code review, build verification, and code organization."
+---
+
+Contributions to XNNPACK are welcome. This guide covers the requirements and workflow for submitting patches.
+
+---
+
+## Contribution Workflow
+
+<Steps>
+  <Step title="Sign the Contributor License Agreement">
+    All contributions must be accompanied by a signed **Contributor License Agreement (CLA)**. The CLA gives Google permission to use and redistribute your contribution while you retain copyright.
+
+    Visit [cla.developers.google.com](https://cla.developers.google.com/) to check your existing agreements or sign a new one.
+
+    <Info>
+      You generally only need to sign the CLA once. If you have already signed one for another Google open-source project, you do not need to sign again.
+    </Info>
+  </Step>
+
+  <Step title="Fork and clone the repository">
+    Fork [google/XNNPACK](https://github.com/google/XNNPACK) on GitHub, then clone your fork locally:
+
+    ```bash
+    git clone https://github.com/<your-username>/XNNPACK.git
+    cd XNNPACK
+    ```
+  </Step>
+
+  <Step title="Build the project locally">
+    Verify the project builds cleanly on your machine before making changes. The `scripts/build-local.sh` script automatically configures and runs CMake for your host platform:
+
+    ```bash
+    # From the XNNPACK root directory
+    scripts/build-local.sh
+    ```
+
+    Build artifacts are placed in `build/local`.
+  </Step>
+
+  <Step title="Run the test suite">
+    After building, run the full test suite with CTest:
+
+    ```bash
+    cd build/local
+    ctest --output-on-failure --parallel $(nproc)
+    ```
+
+    All tests must pass before submitting a pull request.
+  </Step>
+
+  <Step title="Make your changes">
+    Implement your fix or feature. See the [Code Organization](#code-organization) section below for guidance on where to find relevant files.
+  </Step>
+
+  <Step title="Rebuild and re-run tests">
+    After making changes, rebuild and run the test suite again to confirm nothing is broken:
+
+    ```bash
+    # From the XNNPACK root directory
+    scripts/build-local.sh
+    cd build/local
+    ctest --output-on-failure --parallel $(nproc)
+    ```
+  </Step>
+
+  <Step title="Open a pull request">
+    Push your branch and open a pull request against `google/XNNPACK` on GitHub. All submissions — including those by project members — require code review.
+
+    All pull requests are reviewed via GitHub's pull request interface. Consult [GitHub's pull request documentation](https://help.github.com/articles/about-pull-requests/) if you are unfamiliar with the process.
+  </Step>
+</Steps>
+
+---
+
+## Code Review
+
+All changes must go through code review via GitHub pull requests. There are no exceptions to this policy, even for project members.
+
+Reviewers will check for:
+
+- Correctness of the implementation
+- Test coverage for new functionality
+- Performance impact (particularly for microkernel changes)
+- Adherence to existing code style and naming conventions
+
+---
+
+## Community Guidelines
+
+XNNPACK follows [Google's Open Source Community Guidelines](https://opensource.google.com/conduct/). All contributors and participants in discussions are expected to adhere to these guidelines.
+
+---
+
+## Code Organization
+
+Understanding where files live helps you make targeted, correct changes.
+
+### Key top-level directories
+
+| Directory | Contents |
+|---|---|
+| `src/` | Microkernel implementations, operator logic, and runtime code |
+| `include/` | Public C API headers |
+| `test/` | Unit tests for operators and microkernels |
+| `bench/` | Benchmarks |
+| `scripts/` | Build helper scripts (e.g., `build-local.sh`) |
+| `tools/` | Code generation tools for microkernel variants |
+
+### Microkernels
+
+Microkernels are the innermost compute kernels — hand-optimized routines for a single operation on a specific data type and architecture. They live under `src/` in directories named after the data type and operation:
+
+```
+src/<datatype>-<microkernel>/
+```
+
+For example:
+
+- `src/f32-gemm/` — FP32 general matrix multiplication microkernels
+- `src/qs8-dwconv/` — INT8 depthwise convolution microkernels
+- `src/f16-vcvt/` — FP16 type conversion microkernels
+
+Within each directory you will typically find:
+
+- Scalar reference implementations (portable C)
+- Architecture-specific implementations (ARM NEON, x86 SSE/AVX, WebAssembly SIMD, etc.)
+- Auto-generated variants produced by scripts in `tools/`
+
+<Tip>
+  Many microkernel variants are generated rather than hand-written. Before adding a new variant by hand, check whether a generator script in `tools/` can produce it for you. This reduces maintenance burden and ensures consistency across similar kernels.
+</Tip>
+
+### Tests
+
+Tests live in `test/` and are organized by operator and microkernel. When adding a new microkernel, add corresponding tests covering:
+
+- Correctness across representative input shapes and values
+- Edge cases (minimum dimensions, zero-length axes, etc.)
+- All supported data type and quantization combinations for the target operator
+
+---
+
+## Building with Bazel
+
+If you prefer Bazel over CMake, see the [build instructions](https://github.com/google/XNNPACK/blob/master/BUILD.md) for supported configurations. Note that cross-compilation to a different OS or architecture does not work on recent versions of Bazel.
+
+```bash
+# Build and test (fastbuild — no optimization, with assertions)
+bazel build -c fastbuild //bench/... //test/...
+bazel test -c fastbuild --local_test_jobs=HOST_CPUS //bench/... //test/...
+```

@@ -1,0 +1,420 @@
+---
+title: "Runtime"
+description: "Create, configure, execute, and destroy XNNPACK Runtime objects to run neural network inference on compiled Subgraphs."
+---
+
+A **Runtime** is a compiled execution plan derived from a Subgraph. It owns the memory for all internal (intermediate) tensors and the operator dispatch schedule. Once created, a Runtime is independent of the Subgraph it was compiled from — the Subgraph may be deleted immediately after.
+
+The recommended lifecycle (modern pattern):
+
+```
+xnn_create_runtime_v2  →  xnn_reshape_runtime  →  xnn_setup_runtime_v2  →  xnn_invoke_runtime  →  xnn_delete_runtime
+```
+
+For repeated inference with unchanged shapes, call `xnn_invoke_runtime` again without repeating reshape/setup. For dynamic input shapes, call `xnn_reshape_runtime` + `xnn_setup_runtime_v2` before each invocation where shapes change.
+
+<Note>
+  `xnn_setup_runtime` (without `_v2`) is deprecated. It combines shape propagation and buffer binding into one call. Prefer the two-step `xnn_reshape_runtime` + `xnn_setup_runtime_v2` pattern for all new code.
+</Note>
+
+---
+
+## `struct xnn_external_value`
+
+```c
+struct xnn_external_value {
+  uint32_t id;
+  void*    data;
+};
+```
+
+Associates a Value ID with a caller-owned data buffer. Pass an array of these to `xnn_setup_runtime` or `xnn_setup_runtime_v2`.
+
+<ParamField path="id" type="uint32_t" required>
+  Value ID of an external input or output tensor, as returned by `xnn_define_tensor_value` (or a variant).
+</ParamField>
+
+<ParamField path="data" type="void*" required>
+  Pointer to the caller-owned buffer for this tensor. The buffer must be large enough for the tensor's data, plus `XNN_EXTRA_BYTES` of padding beyond the end.
+</ParamField>
+
+---
+
+## Runtime flags
+
+Pass flag constants (OR'd together) to `xnn_create_runtime_v2`, `xnn_create_runtime_v3`, or `xnn_create_runtime_v4`.
+
+| Flag | Value | Description |
+|------|-------|-------------|
+| `XNN_FLAG_HINT_SPARSE_INFERENCE` | `0x00000001` | Hint to XNNPACK to consider sparse inference optimizations. Not guaranteed. |
+| `XNN_FLAG_HINT_FP16_INFERENCE` | `0x00000002` | Hint to XNNPACK to consider IEEE FP16 inference. Not guaranteed. |
+| `XNN_FLAG_FORCE_FP16_INFERENCE` | `0x00000004` | Force IEEE FP16 inference. Fails with `xnn_status_unsupported_hardware` if FP16 is unavailable. On x86, FP16 computations are emulated at significant cost. |
+| `XNN_FLAG_BASIC_PROFILING` | `0x00000008` | Enable per-operator timing. Query results with `xnn_get_runtime_profiling_info`. |
+| `XNN_FLAG_DONT_SPIN_WORKERS` | `0x00000010` | Yield worker threads to the OS scheduler after the last operator in each inference, instead of spinning. Reduces CPU usage between inferences at the cost of higher latency when re-entering inference. |
+| `XNN_FLAG_TRANSIENT_INDIRECTION_BUFFER` | `0x00000020` | Use transient indirection buffers for convolution operators: recomputed each inference from temporary workspace memory rather than persisted. Reduces peak memory at the cost of per-inference setup overhead. |
+| `XNN_FLAG_SLOW_CONSISTENT_ARITHMETIC` | `0x00002000` | Disable codepaths that produce numerically inconsistent results across microkernel variants in the same library build. Slows inference but improves reproducibility. |
+
+---
+
+## Functions
+
+### `xnn_create_runtime`
+
+```c
+enum xnn_status xnn_create_runtime(
+  xnn_subgraph_t subgraph,
+  xnn_runtime_t* runtime_out);
+```
+
+Create a Runtime from a Subgraph using a single caller thread and system defaults (no thread pool, no flags). Equivalent to `xnn_create_runtime_v2(subgraph, NULL, 0, runtime_out)`.
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph to compile. Must not be `NULL`. The Runtime is fully independent after creation; the Subgraph may be deleted immediately.
+</ParamField>
+
+<ParamField path="runtime_out" type="xnn_runtime_t*" required>
+  Output: receives the Runtime handle on success. Must not be `NULL`.
+</ParamField>
+
+**Return values**
+
+| Status | Meaning |
+|--------|---------|
+| `xnn_status_success` | Runtime created. `*runtime_out` is valid. |
+| `xnn_status_uninitialized` | `xnn_initialize` was not called. |
+| `xnn_status_out_of_memory` | Memory allocation failed. |
+| `xnn_status_unsupported_hardware` | A required microkernel is unavailable on this platform. |
+| `xnn_status_invalid_parameter` | The Subgraph or output pointer is `NULL` or invalid. |
+
+---
+
+### `xnn_create_runtime_v2`
+
+```c
+enum xnn_status xnn_create_runtime_v2(
+  xnn_subgraph_t subgraph,
+  pthreadpool_t threadpool,
+  uint32_t flags,
+  xnn_runtime_t* runtime_out);
+```
+
+Create a Runtime with a thread pool and runtime flags. The most commonly used variant.
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph to compile.
+</ParamField>
+
+<ParamField path="threadpool" type="pthreadpool_t">
+  A pthreadpool thread pool for parallelizing operator execution. Pass `NULL` to run on the calling thread only.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  OR'd combination of runtime flags, or `0`. See [Runtime flags](#runtime-flags) above.
+</ParamField>
+
+<ParamField path="runtime_out" type="xnn_runtime_t*" required>
+  Output: receives the Runtime handle on success.
+</ParamField>
+
+---
+
+### `xnn_create_runtime_v3`
+
+```c
+enum xnn_status xnn_create_runtime_v3(
+  xnn_subgraph_t subgraph,
+  xnn_weights_cache_t weights_cache,
+  pthreadpool_t threadpool,
+  uint32_t flags,
+  xnn_runtime_t* runtime_out);
+```
+
+Like `xnn_create_runtime_v2`, but additionally accepts a `weights_cache` to deduplicate packed weight allocations across multiple Runtimes.
+
+<ParamField path="weights_cache" type="xnn_weights_cache_t">
+  Optional cache for packed weights. If non-`NULL`, the Runtime looks up existing packed weights before allocating new ones, reducing total memory consumption when multiple Runtimes share the same weights. Pass `NULL` to disable caching.
+</ParamField>
+
+All other parameters are identical to `xnn_create_runtime_v2`.
+
+---
+
+### `xnn_create_runtime_v4`
+
+```c
+enum xnn_status xnn_create_runtime_v4(
+  xnn_subgraph_t subgraph,
+  xnn_weights_cache_t weights_cache,
+  xnn_workspace_t workspace,
+  pthreadpool_t threadpool,
+  uint32_t flags,
+  xnn_runtime_t* runtime_out);
+```
+
+The most feature-complete variant. Adds a `workspace` for sharing internal tensor allocations across multiple Runtimes.
+
+<ParamField path="workspace" type="xnn_workspace_t">
+  Optional shared workspace for internal tensors. When multiple Runtimes share a workspace, their internal tensor memory regions can overlap (only one Runtime runs at a time). Pass `NULL` to give this Runtime a private workspace.
+</ParamField>
+
+All other parameters are identical to `xnn_create_runtime_v3`.
+
+---
+
+### `xnn_reshape_runtime`
+
+```c
+enum xnn_status xnn_reshape_runtime(
+  xnn_runtime_t runtime);
+```
+
+Propagate tensor shapes through the graph to determine shapes of all intermediate and output tensors. Must be called after any `xnn_reshape_external_value` call and before `xnn_setup_runtime_v2`. May reallocate internal buffers.
+
+<ParamField path="runtime" type="xnn_runtime_t" required>
+  The Runtime whose shapes should be propagated.
+</ParamField>
+
+**Return values**
+
+| Status | Meaning |
+|--------|---------|
+| `xnn_status_success` | Shape propagation succeeded. Output shapes are now queryable via `xnn_get_external_value_shape`. |
+| `xnn_status_invalid_parameter` | An invalid shape was encountered. |
+| `xnn_status_out_of_memory` | Memory (re)allocation failed. |
+
+---
+
+### `xnn_setup_runtime`
+
+```c
+enum xnn_status xnn_setup_runtime(
+  xnn_runtime_t runtime,
+  size_t num_external_values,
+  const struct xnn_external_value* external_values);
+```
+
+Bind external input and output buffers to the Runtime and allocate internal memory. Must be called before `xnn_invoke_runtime`.
+
+<Warning>
+  `xnn_setup_runtime` is deprecated. Prefer the two-step `xnn_reshape_runtime` + `xnn_setup_runtime_v2` pattern for dynamic shape support and clearer separation of concerns.
+</Warning>
+
+<ParamField path="runtime" type="xnn_runtime_t" required>
+  The Runtime to configure.
+</ParamField>
+
+<ParamField path="num_external_values" type="size_t" required>
+  Number of entries in `external_values`. Must equal the total number of external inputs and outputs declared in the Subgraph — all must be provided in a single call.
+</ParamField>
+
+<ParamField path="external_values" type="const struct xnn_external_value*" required>
+  Array of `num_external_values` entries, each pairing a Value ID with a data buffer pointer.
+</ParamField>
+
+**Return values**
+
+| Status | Meaning |
+|--------|---------|
+| `xnn_status_success` | All external bindings set. Runtime is ready to invoke. |
+| `xnn_status_invalid_parameter` | An ID is out of range, a pointer is `NULL`, or the count does not match. |
+| `xnn_status_out_of_memory` | Internal memory allocation failed. |
+
+---
+
+### `xnn_setup_runtime_v2`
+
+```c
+enum xnn_status xnn_setup_runtime_v2(
+  xnn_runtime_t runtime,
+  size_t num_external_values,
+  const struct xnn_external_value* external_values);
+```
+
+Bind external input and output buffers to the Runtime. Unlike `xnn_setup_runtime`, this variant does **not** allocate internal memory — call `xnn_reshape_runtime` first to handle allocation.
+
+<ParamField path="runtime" type="xnn_runtime_t" required>
+  The Runtime to configure.
+</ParamField>
+
+<ParamField path="num_external_values" type="size_t" required>
+  Number of entries in `external_values`. Must match the total number of external inputs and outputs.
+</ParamField>
+
+<ParamField path="external_values" type="const struct xnn_external_value*" required>
+  Array of external buffer bindings.
+</ParamField>
+
+---
+
+### `xnn_invoke_runtime`
+
+```c
+enum xnn_status xnn_invoke_runtime(
+  xnn_runtime_t runtime);
+```
+
+Execute the forward pass for all operators in the Runtime. Runs inference using the currently bound external buffers.
+
+<ParamField path="runtime" type="xnn_runtime_t" required>
+  The Runtime to execute. Must have been set up with `xnn_setup_runtime` or `xnn_setup_runtime_v2` at least once.
+</ParamField>
+
+**Return values**
+
+| Status | Meaning |
+|--------|---------|
+| `xnn_status_success` | Inference completed. Output buffers contain valid results. |
+| `xnn_status_invalid_state` | `xnn_setup_runtime` (or `xnn_setup_runtime_v2`) was not called first. |
+| `xnn_status_out_of_memory` | A transient allocation (e.g., indirection buffer) failed. |
+
+<Tip>
+  After a successful `xnn_invoke_runtime`, you can call it again with the same external buffers without calling setup again. To run inference on different input data, update the buffer contents and call `xnn_invoke_runtime` again — the pointer bindings remain valid.
+</Tip>
+
+---
+
+### `xnn_delete_runtime`
+
+```c
+enum xnn_status xnn_delete_runtime(
+  xnn_runtime_t runtime);
+```
+
+Destroy a Runtime object, freeing all associated operators and internal memory.
+
+<ParamField path="runtime" type="xnn_runtime_t" required>
+  The Runtime to destroy. Must not be used after this call.
+</ParamField>
+
+**Return values**
+
+| Status | Meaning |
+|--------|---------|
+| `xnn_status_success` | Runtime and all associated resources destroyed. |
+
+---
+
+## End-to-end example
+
+The example below demonstrates the full lifecycle: initialization, subgraph creation, runtime creation, setup, repeated inference, and cleanup.
+
+```c
+#include <xnnpack.h>
+#include <pthreadpool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define INPUT_SIZE  4
+#define OUTPUT_SIZE 4
+
+int main(void) {
+  // 1. Initialize XNNPACK.
+  if (xnn_initialize(NULL) != xnn_status_success) {
+    fprintf(stderr, "xnn_initialize failed\n");
+    return 1;
+  }
+
+  // 2. Build a Subgraph with 2 external Value IDs.
+  xnn_subgraph_t subgraph = NULL;
+  xnn_create_subgraph(2, 0, &subgraph);
+
+  size_t input_dims[]  = {1, INPUT_SIZE};
+  size_t output_dims[] = {1, OUTPUT_SIZE};
+
+  uint32_t input_id  = XNN_INVALID_VALUE_ID;
+  uint32_t output_id = XNN_INVALID_VALUE_ID;
+
+  xnn_define_tensor_value(
+    subgraph, xnn_datatype_fp32, 2, input_dims,
+    NULL, 0, XNN_VALUE_FLAG_EXTERNAL_INPUT, &input_id);
+
+  xnn_define_tensor_value(
+    subgraph, xnn_datatype_fp32, 2, output_dims,
+    NULL, 1, XNN_VALUE_FLAG_EXTERNAL_OUTPUT, &output_id);
+
+  // Define operator Nodes here (e.g., xnn_define_fully_connected, etc.)...
+
+  // 3. Create a multi-threaded Runtime.
+  pthreadpool_t threadpool = pthreadpool_create(4);  // 4 worker threads
+  xnn_runtime_t runtime    = NULL;
+  enum xnn_status status = xnn_create_runtime_v2(
+    subgraph, threadpool,
+    XNN_FLAG_HINT_FP16_INFERENCE,
+    &runtime);
+  if (status != xnn_status_success) {
+    fprintf(stderr, "xnn_create_runtime_v2 failed: %d\n", status);
+    return 1;
+  }
+
+  // Subgraph can now be deleted; Runtime is independent.
+  xnn_delete_subgraph(subgraph);
+
+  // 4. Allocate input/output buffers (with XNN_EXTRA_BYTES padding).
+  float* input_buf  = malloc(INPUT_SIZE  * sizeof(float) + XNN_EXTRA_BYTES);
+  float* output_buf = malloc(OUTPUT_SIZE * sizeof(float) + XNN_EXTRA_BYTES);
+
+  // Bind external buffers.
+  struct xnn_external_value externals[] = {
+    {.id = input_id,  .data = input_buf},
+    {.id = output_id, .data = output_buf},
+  };
+  status = xnn_setup_runtime(runtime, 2, externals);
+  if (status != xnn_status_success) {
+    fprintf(stderr, "xnn_setup_runtime failed: %d\n", status);
+    return 1;
+  }
+
+  // 5. Run inference multiple times (same buffers, update input data each time).
+  for (int iter = 0; iter < 10; iter++) {
+    // Fill input with dummy data.
+    for (int i = 0; i < INPUT_SIZE; i++) {
+      input_buf[i] = (float)iter + i;
+    }
+
+    status = xnn_invoke_runtime(runtime);
+    if (status != xnn_status_success) {
+      fprintf(stderr, "xnn_invoke_runtime failed: %d\n", status);
+      break;
+    }
+
+    printf("Iteration %d: output[0] = %f\n", iter, output_buf[0]);
+  }
+
+  // 6. Clean up.
+  xnn_delete_runtime(runtime);
+  pthreadpool_destroy(threadpool);
+  free(input_buf);
+  free(output_buf);
+  xnn_deinitialize();
+  return 0;
+}
+```
+
+---
+
+## Dynamic shape inference
+
+When input shapes change between invocations, use `xnn_reshape_external_value` + `xnn_reshape_runtime` + `xnn_setup_runtime_v2`:
+
+```c
+// Change the input shape to [2, INPUT_SIZE] before the next inference.
+size_t new_dims[] = {2, INPUT_SIZE};
+xnn_reshape_external_value(runtime, input_id, 2, new_dims);
+
+// Propagate shapes through the graph (may reallocate internal buffers).
+xnn_reshape_runtime(runtime);
+
+// Query the new output shape.
+size_t num_out_dims = 0;
+size_t out_dims[XNN_MAX_TENSOR_DIMS];
+xnn_get_external_value_shape(runtime, output_id, &num_out_dims, out_dims);
+
+// Re-bind external buffers and run inference.
+struct xnn_external_value externals[] = {
+  {.id = input_id,  .data = input_buf},
+  {.id = output_id, .data = output_buf},
+};
+xnn_setup_runtime_v2(runtime, 2, externals);
+xnn_invoke_runtime(runtime);
+```

@@ -1,0 +1,218 @@
+---
+title: "Quantization"
+description: "All data types XNNPACK supports — FP32, FP16, BF16, 8-bit and 4-bit integers — and how to choose between per-tensor, per-channel, dynamic, and block-wise quantization."
+---
+
+XNNPACK supports a wide range of numeric formats across its operator and subgraph APIs. The `xnn_datatype` enum names all of them. Choosing the right format is the primary lever for trading model accuracy against memory footprint and inference speed.
+
+## Data types
+
+### Floating-point formats
+
+<CardGroup cols={3}>
+  <Card title="fp32" icon="wave-sine">
+    **IEEE 754 single-precision.** The default and most portable format. All operators support it. Use it unless you have a specific reason to prefer a reduced-precision type.
+  </Card>
+  <Card title="fp16" icon="wave-sine">
+    **IEEE 754 half-precision (16-bit).** Natively accelerated on ARM64 (with FP16 arithmetic extension) and on x86 with AVX-512 FP16. Cuts weight memory by 2× vs. FP32 with minimal accuracy loss on most models.
+  </Card>
+  <Card title="bf16" icon="wave-sine">
+    **BFloat16 — the upper 16 bits of a float32.** Same dynamic range as FP32, reduced mantissa. Primarily used for weights in mixed-precision inference.
+  </Card>
+</CardGroup>
+
+### Quantized integer formats
+
+XNNPACK distinguishes *how* quantization parameters are shared across a tensor:
+
+| `xnn_datatype` | Bits | Sign | Quantization scope |
+|---|---|---|---|
+| `xnn_datatype_qint8` | 8 | signed | Per-tensor (one zero_point + scale) |
+| `xnn_datatype_quint8` | 8 | unsigned | Per-tensor (one zero_point + scale) |
+| `xnn_datatype_qint32` | 32 | signed | Per-tensor |
+| `xnn_datatype_qcint8` | 8 | signed | Per-channel (one scale per output channel) |
+| `xnn_datatype_qcint32` | 32 | signed | Per-channel |
+| `xnn_datatype_qcint4` | 4 | signed | Per-channel (packed 4-bit) |
+| `xnn_datatype_qcint2` | 2 | signed | Per-channel (packed into 8-bit integers) |
+| `xnn_datatype_qdint8` | 8 | signed | Dynamic per-batch |
+| `xnn_datatype_qduint8` | 8 | unsigned | Dynamic per-batch |
+| `xnn_datatype_qpint8` | 8 | signed | Packed with per-row params |
+| `xnn_datatype_qbint4` | 4 | signed | Block-wise per channel |
+
+## Quantization parameters
+
+All per-tensor and per-channel quantized types use the `xnn_quantization_params` struct:
+
+```c
+struct xnn_quantization_params {
+  int32_t zero_point;  // offset subtracted from quantized values
+  float   scale;       // multiplier to recover real values
+};
+```
+
+The dequantization formula is:
+
+```
+real_value = (quantized_value - zero_point) * scale
+```
+
+For `qint8` / `quint8`, a single pair of `(zero_point, scale)` applies to the entire tensor. For `qcint8` / `qcint4`, one `scale` value is provided per output channel; the zero_point is still shared (typically 0 for signed types).
+
+<Note>
+When passing an array of `xnn_quantization_params` to XNNPACK, allocate at least `XNN_EXTRA_QUANTIZATION_PARAMS` (15) extra entries beyond the last valid entry. XNNPACK may read — but will not write — past the end of this array.
+</Note>
+
+## Per-tensor quantization
+
+Per-tensor quantization uses a single (zero_point, scale) pair for the whole tensor. It is the simplest scheme and has the lowest overhead.
+
+```c
+uint32_t output_id;
+xnn_define_quantized_tensor_value(
+  subgraph,
+  xnn_datatype_qint8,
+  /*zero_point=*/0,
+  /*scale=*/0.0078125f,  // 1/128
+  num_dims, dims,
+  /*data=*/NULL,
+  /*external_id=*/XNN_INVALID_VALUE_ID,
+  /*flags=*/0,
+  &output_id);
+```
+
+**Best for:** activations, where a single scale captures the range of the whole tensor reasonably well.
+
+## Per-channel quantization
+
+Per-channel quantization assigns a separate scale value to each output channel (or input channel, for depthwise convolution). This significantly improves accuracy for weights that have very different ranges across channels.
+
+```c
+// One scale per output channel.
+float per_channel_scales[output_channels];
+// ... populate scales ...
+
+uint32_t filter_id;
+xnn_define_channelwise_quantized_tensor_value(
+  subgraph,
+  xnn_datatype_qcint8,
+  /*channel_dim=*/0,        // output channel is dimension 0 for conv filters
+  per_channel_scales,
+  num_dims, dims,
+  filter_data,
+  XNN_INVALID_VALUE_ID, /*flags=*/0,
+  &filter_id);
+```
+
+**Best for:** convolution and fully-connected weight tensors, where per-channel quantization is the industry standard (TFLite, ONNX).
+
+## Dynamic quantization
+
+Dynamic quantization (`qdint8`, `qduint8`) computes quantization parameters — min, max, scale, zero_point — from the actual data values at inference time, once per batch element. No static calibration step is needed.
+
+```c
+uint32_t dq_id;
+xnn_define_dynamically_quantized_tensor_value(
+  subgraph,
+  xnn_datatype_qdint8,
+  /*num_dims=*/2,
+  /*num_nonbatch_dims=*/1,  // last 1 dimension is non-batch
+  dims,
+  XNN_INVALID_VALUE_ID, /*flags=*/0,
+  &dq_id);
+```
+
+The `num_nonbatch_dims` parameter controls how many trailing dimensions form one "row". The leading `num_dims - num_nonbatch_dims` dimensions are flattened into the batch. A separate set of quantization parameters is computed for each batch element.
+
+The `qpint8` type extends this: quantized int8 values are stored together with their per-row quantization parameters in a single packed buffer, allowing fused dequantize-and-compute kernels.
+
+**Best for:** large language model inference (attention queries, keys, values) where input distributions vary too much across requests to fix a calibration scale.
+
+## Block-wise quantization
+
+Block-wise quantization (`qbint4`) applies a separate scale to each *block* of elements along the channel dimension. The minimum block size is `XNN_MIN_BLOCKSIZE` = 32 elements.
+
+```c
+// For a fully-connected filter [output_channels, input_channels]:
+// number of scale values = output_channels * (input_channels / block_size)
+size_t num_scales = output_channels * (input_channels / block_size);
+uint16_t scales[num_scales];  // fp16 scales
+// ... populate scales ...
+
+uint32_t filter_id;
+xnn_define_blockwise_quantized_tensor_value(
+  subgraph,
+  xnn_datatype_qbint4,
+  /*zero_point=*/0,
+  scales,
+  /*num_dims=*/2,
+  /*channel_dim=*/0,
+  /*block_size=*/32,
+  dims,
+  filter_data,
+  XNN_INVALID_VALUE_ID, /*flags=*/0,
+  &filter_id);
+```
+
+<Note>
+Block sizes below `XNN_MIN_BLOCKSIZE` (32) are not supported. The v2 variant (`xnn_define_blockwise_quantized_tensor_value_v2`) additionally accepts a `scale_type` parameter that can be either `xnn_datatype_bf16` or `xnn_datatype_fp16` for the scale array, using only the upper 7 mantissa bits for scale computation.
+</Note>
+
+**Best for:** weight-only quantization in large language models, where extremely fine-grained scales (per 32 or 64 elements) dramatically reduce quantization error on outlier-heavy weight distributions.
+
+## Inference-time precision flags
+
+Quantization can also be controlled at the Runtime level via flags passed to `xnn_create_runtime_v4()`:
+
+| Flag | Effect |
+|---|---|
+| `XNN_FLAG_HINT_FP16_INFERENCE` | Prefer FP16 compute paths where available. Falls back gracefully to FP32. |
+| `XNN_FLAG_FORCE_FP16_INFERENCE` | Require FP16. Fails if the hardware does not support native FP16. |
+| `XNN_FLAG_HINT_SPARSE_INFERENCE` | Enable sparse fast-path kernels (from [Elsen et al., 2020](https://arxiv.org/abs/1911.09723)) where applicable. |
+
+<Tabs>
+  <Tab title="Hint FP16">
+    ```c
+    xnn_create_runtime_v4(subgraph, NULL, NULL, threadpool,
+                          XNN_FLAG_HINT_FP16_INFERENCE, &runtime);
+    // XNNPACK uses FP16 on ARM64 with native FP16 support,
+    // falls back to FP32 elsewhere.
+    ```
+  </Tab>
+  <Tab title="Force FP16">
+    ```c
+    // Will return xnn_status_unsupported_hardware on devices without FP16.
+    enum xnn_status status =
+      xnn_create_runtime_v4(subgraph, NULL, NULL, threadpool,
+                            XNN_FLAG_FORCE_FP16_INFERENCE, &runtime);
+    ```
+  </Tab>
+  <Tab title="Sparse inference">
+    ```c
+    xnn_create_runtime_v4(subgraph, NULL, NULL, threadpool,
+                          XNN_FLAG_HINT_SPARSE_INFERENCE, &runtime);
+    ```
+  </Tab>
+</Tabs>
+
+## Choosing a data type
+
+<CardGroup cols={2}>
+  <Card title="FP32" icon="circle-check">
+    Safe default. Highest accuracy. No calibration required. Choose this when development speed matters more than model size or latency.
+  </Card>
+  <Card title="FP16 / BF16" icon="bolt">
+    2× memory saving over FP32 with negligible accuracy regression on most models. Best for devices with native FP16 support (ARM64, modern x86).
+  </Card>
+  <Card title="QS8 / QU8 per-tensor" icon="compress">
+    4× memory saving over FP32. Requires post-training quantization (PTQ) or quantization-aware training (QAT). Use for edge devices with limited memory.
+  </Card>
+  <Card title="QC INT8 per-channel" icon="sliders">
+    Better accuracy than per-tensor for weights. Standard scheme used by TFLite and ONNX quantized models. Combine with per-tensor activations.
+  </Card>
+  <Card title="4-bit (qcint4 / qbint4)" icon="memory">
+    8× memory saving over FP32. Suited for weight-only quantization of large models where activations remain in FP16 or FP32.
+  </Card>
+  <Card title="Dynamic (qdint8)" icon="arrows-rotate">
+    No calibration dataset needed. Useful when input distributions vary widely (e.g. LLM token activations). Slightly higher per-inference overhead than static quantization.
+  </Card>
+</CardGroup>

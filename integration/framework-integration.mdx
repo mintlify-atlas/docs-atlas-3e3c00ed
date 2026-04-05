@@ -1,0 +1,123 @@
+---
+title: "Framework Integration"
+description: "How XNNPACK integrates with TensorFlow Lite, TensorFlow.js, PyTorch, ONNX Runtime, ExecuTorch, MediaPipe, and more."
+---
+
+XNNPACK is a low-level neural network inference library. It provides highly optimized compute primitives for ARM, x86, WebAssembly, and RISC-V platforms and is designed to be consumed by higher-level machine learning frameworks — not used directly by ML practitioners.
+
+<Note>
+  XNNPACK is **not** intended for direct use by deep learning practitioners or researchers. It is a backend acceleration library. If you are training or running models, use one of the supported frameworks listed below, which leverage XNNPACK automatically.
+</Note>
+
+## Supported Frameworks
+
+<CardGroup cols={2}>
+  <Card title="TensorFlow Lite" icon="bolt" href="https://blog.tensorflow.org/2020/07/accelerating-tensorflow-lite-xnnpack-integration.html">
+    Default high-performance CPU inference backend for TFLite on Android, iOS, Linux, macOS, and Windows.
+  </Card>
+  <Card title="TensorFlow.js" icon="globe" href="https://blog.tensorflow.org/2020/03/introducing-webassembly-backend-for-tensorflow-js.html">
+    Powers the WebAssembly backend with SIMD acceleration, enabling fast in-browser inference.
+  </Card>
+  <Card title="PyTorch Mobile" icon="mobile" href="https://pytorch.org/mobile">
+    Used as an optimized operator backend for on-device inference with PyTorch Mobile.
+  </Card>
+  <Card title="ExecuTorch" icon="microchip" href="https://pytorch.org/executorch-overview">
+    PyTorch's next-generation on-device inference runtime delegates compute to XNNPACK for edge deployments.
+  </Card>
+  <Card title="ONNX Runtime" icon="diagram-project" href="https://onnxruntime.ai/docs/execution-providers/Xnnpack-ExecutionProvider.html">
+    The XNNPACK Execution Provider accelerates ONNX model inference on mobile and embedded targets.
+  </Card>
+  <Card title="MediaPipe" icon="camera" href="https://developers.googleblog.com/2020/01/mediapipe-on-web.html">
+    MediaPipe for the Web uses XNNPACK to power real-time ML pipelines in the browser.
+  </Card>
+  <Card title="Alibaba HALO" icon="building" href="https://github.com/alibaba/heterogeneity-aware-lowering-and-optimization">
+    Heterogeneity-Aware Lowering and Optimization compiler targets XNNPACK as a backend.
+  </Card>
+  <Card title="Samsung ONE" icon="microchip" href="https://github.com/Samsung/ONE">
+    On-device Neural Engine uses XNNPACK for optimized inference on Samsung hardware.
+  </Card>
+</CardGroup>
+
+---
+
+## TensorFlow Lite
+
+TensorFlow Lite uses XNNPACK as its **default high-performance CPU backend**. When you run inference with TFLite on a supported platform, XNNPACK is automatically selected to accelerate supported operators.
+
+Key characteristics of the TFLite–XNNPACK integration:
+
+- Enabled by default — no code changes required
+- Supports floating-point (FP32, FP16) and quantized (INT8) operators
+- Works on Android, iOS, Linux, macOS, and Windows
+
+For details on the integration and its performance characteristics, see the [TensorFlow Blog announcement](https://blog.tensorflow.org/2020/07/accelerating-tensorflow-lite-xnnpack-integration.html).
+
+---
+
+## TensorFlow.js WebAssembly Backend
+
+The [TensorFlow.js WebAssembly backend](https://blog.tensorflow.org/2020/03/introducing-webassembly-backend-for-tensorflow-js.html), introduced in March 2020, is powered by XNNPACK compiled to WebAssembly via Emscripten.
+
+- Runs directly in web browsers and Node.js — no native dependencies
+- Supports **WebAssembly SIMD128** for significantly faster inference compared to scalar WebAssembly
+- Falls back gracefully to MVP WebAssembly on browsers without SIMD support
+
+See the [WebAssembly integration guide](/integration/webassembly) for information on building XNNPACK for WebAssembly targets.
+
+---
+
+## PyTorch Mobile
+
+[PyTorch Mobile](https://pytorch.org/mobile) leverages XNNPACK to accelerate operator execution during on-device inference. The integration is transparent — PyTorch selects XNNPACK kernels for supported operations automatically when the library is present.
+
+XNNPACK accelerates common operations including convolution, depthwise convolution, fully connected layers, and element-wise operations across ARM and x86 mobile targets.
+
+---
+
+## ExecuTorch
+
+[ExecuTorch](https://pytorch.org/executorch-overview) is PyTorch's production-grade runtime for edge and mobile inference. It uses a delegation model where subgraphs of an exported PyTorch model are lowered to hardware-specific backends. XNNPACK is a primary delegate target, providing optimized kernel execution for ARM and x86 edge devices.
+
+---
+
+## ONNX Runtime — XNNPACK Execution Provider
+
+[ONNX Runtime](https://onnxruntime.ai/docs/execution-providers/Xnnpack-ExecutionProvider.html) supports XNNPACK through its **Execution Provider** (EP) interface. The XNNPACK EP accelerates inference on mobile and embedded Linux targets.
+
+To enable the XNNPACK Execution Provider when using the ONNX Runtime C++ API:
+
+```cpp
+Ort::SessionOptions session_options;
+session_options.AppendExecutionProvider("XNNPACK");
+
+Ort::Session session(env, model_path, session_options);
+```
+
+When using the Python API:
+
+```python
+import onnxruntime as ort
+
+providers = ["XnnpackExecutionProvider", "CPUExecutionProvider"]
+session = ort.InferenceSession("model.onnx", providers=providers)
+```
+
+Refer to the [ONNX Runtime XNNPACK EP documentation](https://onnxruntime.ai/docs/execution-providers/Xnnpack-ExecutionProvider.html) for the full list of supported operators and configuration options.
+
+---
+
+## MediaPipe for the Web
+
+[MediaPipe for the Web](https://developers.googleblog.com/2020/01/mediapipe-on-web.html) uses XNNPACK (compiled to WebAssembly) to power its real-time ML inference pipelines in the browser. This enables tasks such as face detection, hand tracking, and pose estimation to run efficiently client-side without a server round-trip.
+
+---
+
+## Alibaba HALO
+
+[HALO (Heterogeneity-Aware Lowering and Optimization)](https://github.com/alibaba/heterogeneity-aware-lowering-and-optimization) is a compiler framework from Alibaba Research that lowers neural network models to optimized code. It supports XNNPACK as a target backend for CPU inference.
+
+---
+
+## Samsung ONE
+
+[Samsung ONE (On-device Neural Engine)](https://github.com/Samsung/ONE) is an open-source neural network runtime that includes XNNPACK as a backend for optimized on-device inference on Samsung and other ARM-based platforms.

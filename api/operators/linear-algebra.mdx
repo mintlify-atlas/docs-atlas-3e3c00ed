@@ -1,0 +1,343 @@
+---
+title: "Linear Algebra Operator API"
+description: "Reference documentation for xnn_define_fully_connected, xnn_define_fully_connected_sparse, and xnn_define_batch_matrix_multiply subgraph node functions."
+---
+
+# Linear Algebra Operators
+
+XNNPACK provides three linear-algebra subgraph nodes: a dense fully-connected layer, an
+experimental sparse variant, and a batched matrix multiplication.
+
+All functions add a Node to a `xnn_subgraph_t`. All return an `enum xnn_status`.
+
+---
+
+## `xnn_define_fully_connected`
+
+Define a Fully Connected (dense linear) Node and add it to a Subgraph.
+
+Computes `output = input @ filter^T + bias` (with an optional transpose of the filter
+controlled by a flag). This is equivalent to a GEMV/GEMM operation and maps to
+optimized GEMM microkernels internally.
+
+```c
+enum xnn_status xnn_define_fully_connected(
+  xnn_subgraph_t subgraph,
+  float output_min,
+  float output_max,
+  uint32_t input_id,
+  uint32_t filter_id,
+  uint32_t bias_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+### Parameters
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph object that will own the created Node.
+</ParamField>
+
+<ParamField path="output_min" type="float" required>
+  Lower bound for clamping output values. Use `-INFINITY` to disable. Common values:
+  - `0.0f` for a fused ReLU
+  - `0.0f` with `output_max = 6.0f` for a fused ReLU6
+</ParamField>
+
+<ParamField path="output_max" type="float" required>
+  Upper bound for clamping output values. Use `+INFINITY` to disable.
+</ParamField>
+
+<ParamField path="input_id" type="uint32_t" required>
+  Value ID for the input tensor. Must be at least 1D. Its last dimension must match the last
+  dimension of the filter tensor. For a 2D input of shape `[batch_size, input_channels]`, the
+  last dimension is `input_channels`.
+</ParamField>
+
+<ParamField path="filter_id" type="uint32_t" required>
+  Value ID for the filter (weight) tensor. Must be a 2D tensor.
+
+  - **Without `XNN_FLAG_TRANSPOSE_WEIGHTS`**: shape is `[output_channels, input_channels]`.
+  - **With `XNN_FLAG_TRANSPOSE_WEIGHTS`**: shape is `[input_channels, output_channels]`.
+
+  The filter must be statically initialized (i.e., its `data` pointer in the Value must be non-`NULL`
+  at subgraph-definition time, unless a dynamic variant is used).
+</ParamField>
+
+<ParamField path="bias_id" type="uint32_t" required>
+  Value ID for the bias tensor, or `XNN_INVALID_VALUE_ID` for a bias-free layer. If present,
+  must be a 1D tensor of shape `[output_channels]`.
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID for the output tensor. Same rank as the input tensor. All dimensions except the last
+  match the input; the last dimension equals `output_channels` (first dimension of filter when
+  `XNN_FLAG_TRANSPOSE_WEIGHTS` is not set).
+
+  For a 2D input `[batch_size, input_channels]`, the output is `[batch_size, output_channels]`.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Bitfield of behavioral flags. See [Flags](#flags) section.
+</ParamField>
+
+### Flags
+
+| Flag | Value | Description |
+|------|-------|-------------|
+| `XNN_FLAG_TRANSPOSE_WEIGHTS` | `0x00000001` | Filter tensor has shape `[input_channels, output_channels]` instead of the default `[output_channels, input_channels]`. |
+
+### Relationship to GEMM
+
+Internally, `xnn_define_fully_connected` is dispatched to highly optimized GEMM microkernels.
+For a 2D input `[B, K]` and a filter `[N, K]`:
+
+```
+output[B, N] = input[B, K] * filter[N, K]^T + bias[N]
+```
+
+The filter is packed at Runtime creation time, so subsequent calls to `xnn_invoke_runtime` do not
+re-pack weights.
+
+### Quantized Variants
+
+The Subgraph API transparently selects the appropriate quantized microkernel based on the data
+types of the `input_id` and `filter_id` tensors. For example:
+
+- `xnn_datatype_qdint8` input + `xnn_datatype_qcint8` filter → dynamically quantized path
+- `xnn_datatype_qint8` input + `xnn_datatype_qcint4` filter → 4-bit weight quantization path
+- `xnn_datatype_fp16` input + `xnn_datatype_fp16` filter → FP16 path
+
+### Output Clamping
+
+After computing `output = input @ W^T + b`, every element is clamped:
+
+```
+output[i] = clamp(output[i], output_min, output_max)
+```
+
+### Usage Example
+
+```c
+#include <xnnpack.h>
+#include <math.h>
+
+// FP32 fully-connected: [batch, 512] -> [batch, 1024]
+// filter shape: [1024, 512] (output_channels × input_channels)
+enum xnn_status status = xnn_define_fully_connected(
+  subgraph,
+  /*output_min=*/ 0.0f,      // fused ReLU
+  /*output_max=*/ +INFINITY,
+  input_id,
+  filter_id,
+  bias_id,
+  output_id,
+  /*flags=*/      0);
+
+if (status != xnn_status_success) { /* handle error */ }
+```
+
+---
+
+## `xnn_define_fully_connected_sparse`
+
+Define a Sparse Fully Connected Node and add it to a Subgraph.
+
+<Warning>
+  This operator is **experimental** and may be removed in a future release. It is intended to
+  exploit weight sparsity for models trained with structured pruning, and is subject to change.
+</Warning>
+
+```c
+enum xnn_status xnn_define_fully_connected_sparse(
+  xnn_subgraph_t subgraph,
+  float output_min,
+  float output_max,
+  uint32_t input_id,
+  uint32_t filter_id,
+  uint32_t bias_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+The signature is identical to `xnn_define_fully_connected`. The filter must be sparsely populated.
+
+### Parameters
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph object that will own the created Node.
+</ParamField>
+
+<ParamField path="output_min" type="float" required>
+  Lower bound for clamping output values.
+</ParamField>
+
+<ParamField path="output_max" type="float" required>
+  Upper bound for clamping output values.
+</ParamField>
+
+<ParamField path="input_id" type="uint32_t" required>
+  Value ID for the input tensor. When `XNN_FLAG_TENSORFLOW_RESHAPE_2D` is not specified, must be
+  at least 1D and its last dimension must match the filter's input channels. When
+  `XNN_FLAG_TENSORFLOW_RESHAPE_2D` is specified, the tensor is first flattened into 1D and
+  reshaped to `[num_elements / input_channels, input_channels]`.
+</ParamField>
+
+<ParamField path="filter_id" type="uint32_t" required>
+  Value ID for the (sparse) filter tensor. Must be 2D.
+
+  - Without `XNN_FLAG_TRANSPOSE_WEIGHTS`: `[output_channels, input_channels]`
+  - With `XNN_FLAG_TRANSPOSE_WEIGHTS`: `[input_channels, output_channels]`
+</ParamField>
+
+<ParamField path="bias_id" type="uint32_t" required>
+  Value ID for the bias tensor, or `XNN_INVALID_VALUE_ID`. If present, must be 1D of shape
+  `[output_channels]`.
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID for the output tensor. When `XNN_FLAG_TENSORFLOW_RESHAPE_2D` is not specified, same
+  dimensionality as input with last dimension replaced by `output_channels`. When specified,
+  a 2D tensor `[num_elements / input_channels, output_channels]`.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Supported flags: `XNN_FLAG_TRANSPOSE_WEIGHTS` and `XNN_FLAG_TENSORFLOW_RESHAPE_2D`.
+</ParamField>
+
+---
+
+## `xnn_define_batch_matrix_multiply`
+
+Define a Batch Matrix Multiply Node and add it to a Subgraph.
+
+Computes `output = input1 @ input2` (or with optional transpositions) for batched 3-D+ tensors,
+following broadcasting rules for batch dimensions.
+
+```c
+enum xnn_status xnn_define_batch_matrix_multiply(
+  xnn_subgraph_t subgraph,
+  uint32_t input1_id,
+  uint32_t input2_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+### Parameters
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph object that will own the created Node.
+</ParamField>
+
+<ParamField path="input1_id" type="uint32_t" required>
+  Value ID for the first input tensor (matrix A). Must be at least 3D. The first N-2 dimensions
+  are batch dimensions. The last 2 dimensions are `[M, K]`.
+
+  - Without `XNN_FLAG_TRANSPOSE_B`: the last dimension `K` must match the second-to-last
+    dimension of `input2` (`K` in `[K, N]`).
+  - With `XNN_FLAG_TRANSPOSE_B`: `K` must match the last dimension of `input2`.
+</ParamField>
+
+<ParamField path="input2_id" type="uint32_t" required>
+  Value ID for the second input tensor (matrix B). Must be at least 3D with matching batch
+  dimensions. The last 2 dimensions are:
+
+  - Without `XNN_FLAG_TRANSPOSE_B`: `[K, N]`
+  - With `XNN_FLAG_TRANSPOSE_B`: `[N, K]`
+
+  `input2` may be statically initialized (constant weights), in which case XNNPACK can optimize
+  packing at runtime creation time.
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID for the output tensor. Must be at least 3D. The first N-2 dimensions must match those
+  of the inputs. The last 2 dimensions are `[M, N]`.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Bitfield of behavioral flags. See the [Flags](#flags-1) section.
+</ParamField>
+
+### Flags
+
+| Flag | Value | Description |
+|------|-------|-------------|
+| `XNN_FLAG_TRANSPOSE_B` | `0x00000001` | Transpose `input2` before multiplication. `input2` must have shape `[batch…, N, K]` instead of `[batch…, K, N]`. |
+| `XNN_FLAG_NO_BROADCAST` | `0x00001000` | Signal that batch dimensions are identical in both inputs (disables broadcasting path). |
+
+### Output Shape
+
+Given `input1` of shape `[batch…, M, K]` and `input2` of shape `[batch…, K, N]`:
+
+```
+output shape: [broadcast(batch_1, batch_2)…, M, N]
+```
+
+where `broadcast(a, b)` is element-wise maximum of the two batch dimension arrays under NumPy
+broadcasting rules.
+
+### Quantized Support
+
+The batch matrix multiply operator supports the following type combinations:
+
+| input1 type | input2 type | output type |
+|---|---|---|
+| `xnn_datatype_fp32` | `xnn_datatype_fp32` | `xnn_datatype_fp32` |
+| `xnn_datatype_fp16` | `xnn_datatype_fp16` | `xnn_datatype_fp16` |
+| `xnn_datatype_bf16` | `xnn_datatype_bf16` | `xnn_datatype_fp32` |
+| `xnn_datatype_qdint8` | `xnn_datatype_qcint8` | `xnn_datatype_fp32` |
+| `xnn_datatype_qint8` | `xnn_datatype_qint8` | `xnn_datatype_qint8` |
+
+<Tip>
+  When `input2` is statically initialized (e.g., query/key projection matrices in attention),
+  XNNPACK uses a `_const_weights` path that packs weights at Runtime creation time and avoids
+  re-packing on each invocation. This significantly improves throughput for transformer models.
+</Tip>
+
+### Usage Example
+
+```c
+#include <xnnpack.h>
+
+// Batch matmul: [B, T, D] @ [B, D, H] -> [B, T, H]
+// No transposition.
+enum xnn_status status = xnn_define_batch_matrix_multiply(
+  subgraph,
+  input1_id,   // shape: [B, T, D]
+  input2_id,   // shape: [B, D, H]
+  output_id,   // shape: [B, T, H]
+  /*flags=*/   0);
+
+// Attention scores: Q @ K^T, i.e. [B, H, T, D] @ [B, H, D, S]^T
+// Use XNN_FLAG_TRANSPOSE_B so input2 may be stored as [B, H, S, D]
+status = xnn_define_batch_matrix_multiply(
+  subgraph,
+  query_id,    // shape: [B, H, T, D]
+  key_id,      // shape: [B, H, S, D] (will be transposed to [B, H, D, S])
+  scores_id,   // shape: [B, H, T, S]
+  /*flags=*/   XNN_FLAG_TRANSPOSE_B);
+```
+
+---
+
+## Comparing Fully Connected and Batch Matrix Multiply
+
+| Aspect | `xnn_define_fully_connected` | `xnn_define_batch_matrix_multiply` |
+|---|---|---|
+| Filter packing | At runtime creation (static) | At runtime creation (static B) or per-invoke (dynamic B) |
+| Bias support | Yes (optional) | No |
+| Output clamping | Yes (`output_min`, `output_max`) | No |
+| Batch dims | Treated as batch size (1D/2D flattened) | Full N-D broadcasting |
+| Primary use | Dense layer, embedding projection | Attention, general GEMM |
+
+---
+
+## Return Values
+
+| Status | Meaning |
+|--------|---------|
+| `xnn_status_success` | Node was successfully added to the subgraph. |
+| `xnn_status_invalid_parameter` | A parameter (e.g., tensor shape, flags) is inconsistent. |
+| `xnn_status_uninitialized` | `xnn_initialize()` was not called before use. |
+| `xnn_status_out_of_memory` | Memory allocation failed. |
+| `xnn_status_unsupported_parameter` | The data type or flag combination is not supported on this build. |

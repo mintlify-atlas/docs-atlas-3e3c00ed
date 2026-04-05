@@ -1,0 +1,106 @@
+---
+title: "Operators overview"
+description: "All XNNPACK neural network operators at a glance, grouped by category."
+---
+
+XNNPACK implements a comprehensive set of neural network operators targeting ARM, x86, WebAssembly, and RISC-V platforms. All operators support **NHWC layout** and allow a custom stride along the channel dimension, enabling zero-cost Channel Split and Channel Concatenation.
+
+<CardGroup cols={2}>
+  <Card title="Convolution" icon="grid-2x2" href="/operators/convolution">
+    2D Convolution, grouped convolution, depthwise convolution, and transposed convolution (deconvolution).
+  </Card>
+  <Card title="Pooling" icon="layers" href="/operators/pooling">
+    Average, max, argmax, global average pooling, and unpooling.
+  </Card>
+  <Card title="Elementwise" icon="function" href="/operators/elementwise">
+    Unary and binary operations including activations, arithmetic, and broadcasting.
+  </Card>
+  <Card title="Matrix multiply" icon="table" href="/operators/matrix-multiply">
+    Fully connected layers and batch matrix multiply with flexible weight layouts.
+  </Card>
+</CardGroup>
+
+## Convolution
+
+| Operator | Description |
+|---|---|
+| 2D Convolution | Standard spatial convolution, including grouped and depthwise variants |
+| 2D Deconvolution | Transposed convolution for upsampling |
+| 2D Depthwise Convolution | Channel-separable convolution with optional depth multiplier |
+
+## Pooling
+
+| Operator | Description |
+|---|---|
+| 2D Average Pooling | Computes the mean of elements in each pooling window |
+| 2D Max Pooling | Selects the maximum element in each pooling window |
+| 2D ArgMax Pooling | Max pooling that also outputs the index of the maximum value |
+| Global Average Pooling | Reduces spatial dimensions by averaging all elements per channel |
+| 2D Unpooling | Inverse of ArgMax Pooling; scatters values back to their original positions |
+
+## Spatial
+
+| Operator | Description |
+|---|---|
+| 2D Bilinear Resize | Resizes 4D tensors using bilinear interpolation |
+| 2D Depth-to-Space | Rearranges depth data into spatial blocks (Pixel Shuffle) |
+| 2D Space-to-Depth | Rearranges spatial blocks into depth (inverse of Depth-to-Space) |
+
+## Binary (with broadcasting)
+
+All binary operators follow NumPy broadcasting rules. Dimensions of size 1 are broadcast to match the other operand.
+
+| Operator | Description |
+|---|---|
+| Add | Elementwise addition of two tensors |
+| Subtract | Elementwise subtraction |
+| Multiply | Elementwise multiplication |
+| Divide | Elementwise division |
+| Maximum | Elementwise maximum |
+| Minimum | Elementwise minimum |
+| Squared Difference | Elementwise `(a - b)²` |
+
+## Unary (activation and elementwise)
+
+| Operator | Description |
+|---|---|
+| Abs | Absolute value |
+| Bankers' Rounding | Round to nearest, ties to even |
+| Ceiling | Round up to integer |
+| Clamp / ReLU / ReLU6 | Clip output to `[output_min, output_max]` |
+| Convert | Type conversion, including fixed-point and half-precision quantization |
+| Copy | Copies input tensor to output tensor |
+| ELU | Exponential Linear Unit: `x` if `x ≥ 0`, else `alpha * (exp(x) - 1)` |
+| Floor | Round down to integer |
+| GELU | Gaussian Error Linear Unit |
+| HardSwish | `x * ReLU6(x + 3) / 6` |
+| Leaky ReLU | `x` if `x ≥ 0`, else `negative_slope * x` |
+| Negate | Elementwise negation |
+| PReLU | Parametric ReLU with per-channel slopes |
+| Sigmoid | `1 / (1 + exp(-x))` |
+| Softmax | Normalised exponentials over the last dimension |
+| Square | Elementwise `x²` |
+| Square Root | Elementwise `√x` |
+| Reciprocal Square Root | Elementwise `1 / √x` |
+| Tanh | Hyperbolic tangent |
+| Truncation | Round towards zero |
+
+## Linear algebra
+
+| Operator | Description |
+|---|---|
+| Fully Connected | Dense layer (`y = x * Wᵀ + b`), with optional transposed-weights layout |
+| Batch Matrix Multiply | Batched matrix–matrix product with optional transposition of either operand |
+
+## Other
+
+| Operator | Description |
+|---|---|
+| Channel Shuffle | Rearranges channels across groups |
+| Transpose | Generalized permutation of tensor dimensions |
+
+## Layout and channel strides
+
+<Note>
+All XNNPACK operators accept tensors in **NHWC** (batch, height, width, channels) layout. Additionally, each operator accepts a custom stride along the channel dimension. This means an operator can read from or write to a slice of channels within a larger tensor buffer — providing **zero-cost Channel Split and Channel Concatenation** without any data copies.
+</Note>

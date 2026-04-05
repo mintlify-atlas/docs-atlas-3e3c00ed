@@ -1,0 +1,333 @@
+---
+title: "Subgraph & Runtime"
+description: "How to define a neural network model as an XNNPACK Subgraph, compile it into a Runtime, and run repeated inference."
+---
+
+The XNNPACK programming model separates *model definition* (Subgraph) from *execution* (Runtime). A Subgraph is built once and describes the graph structure — which tensors exist and which operators connect them. A Runtime is then compiled from that Subgraph and is the object you interact with at inference time.
+
+```
+xnn_create_subgraph()
+        │
+        ▼
+  Define Values (xnn_define_tensor_value / xnn_define_quantized_tensor_value …)
+  Define Nodes  (xnn_define_convolution_2d / xnn_define_fully_connected …)
+        │
+        ▼
+xnn_create_runtime_v4()   ← compile, fuse, plan memory
+        │
+        ▼
+xnn_reshape_runtime()     ← propagate shapes
+        │
+   ┌────┴──────────────────────────────────┐
+   │  for each inference:                  │
+   │  xnn_setup_runtime_v2()               │
+   │  xnn_invoke_runtime()                 │
+   └───────────────────────────────────────┘
+        │
+        ▼
+xnn_delete_runtime()
+xnn_delete_subgraph()
+```
+
+## Subgraph
+
+A Subgraph (`xnn_subgraph_t`) is an abstract representation of a neural network model. It is created empty and populated by a series of `xnn_define_*` calls.
+
+```c
+xnn_subgraph_t subgraph = NULL;
+// Reserve IDs 0..3 for external (caller-managed) tensors.
+xnn_create_subgraph(/*external_value_ids=*/4, /*flags=*/0, &subgraph);
+```
+
+The `external_value_ids` parameter reserves a contiguous block of low IDs (0 … N-1) for tensors that the caller will provide at setup time. Internal tensors — intermediate activations, for example — receive IDs above this range, assigned automatically by the library.
+
+### Values (tensors)
+
+A Value (`xnn_value`) represents a tensor. Values are defined before the Nodes that reference them.
+
+<Tabs>
+  <Tab title="Floating-point">
+    ```c
+    uint32_t input_id;
+    size_t input_dims[] = {1, 224, 224, 3};   // N, H, W, C
+    xnn_define_tensor_value(
+      subgraph,
+      xnn_datatype_fp32,
+      /*num_dims=*/4, input_dims,
+      /*data=*/NULL,           // NULL → dynamic (external) tensor
+      /*external_id=*/0,       // caller-assigned ID
+      XNN_VALUE_FLAG_EXTERNAL_INPUT,
+      &input_id);
+    ```
+  </Tab>
+  <Tab title="Static (weights)">
+    ```c
+    uint32_t filter_id;
+    // `filter_data` must remain alive for the lifetime of the subgraph and
+    // all runtimes created from it.
+    xnn_define_tensor_value(
+      subgraph,
+      xnn_datatype_fp32,
+      /*num_dims=*/4, filter_dims,
+      /*data=*/filter_data,    // non-NULL → static (embedded) tensor
+      /*external_id=*/XNN_INVALID_VALUE_ID,
+      /*flags=*/0,
+      &filter_id);
+    ```
+  </Tab>
+  <Tab title="Quantized">
+    ```c
+    uint32_t quant_id;
+    xnn_define_quantized_tensor_value(
+      subgraph,
+      xnn_datatype_qint8,
+      /*zero_point=*/0,
+      /*scale=*/0.0078125f,
+      /*num_dims=*/4, dims,
+      /*data=*/NULL,
+      /*external_id=*/1,
+      XNN_VALUE_FLAG_EXTERNAL_INPUT,
+      &quant_id);
+    ```
+  </Tab>
+</Tabs>
+
+**Key distinctions for Values:**
+
+| Property | Meaning |
+|---|---|
+| `external_id` in `[0, N)` | The caller supplies a buffer pointer at setup time. |
+| `external_id == XNN_INVALID_VALUE_ID` | XNNPACK allocates and manages the buffer internally. |
+| `data != NULL` | Static tensor — weights or biases baked into the subgraph. The pointer must remain valid for the lifetime of all derived Runtime objects. |
+| `XNN_VALUE_FLAG_EXTERNAL_INPUT` | Marks the Value as a graph input. |
+| `XNN_VALUE_FLAG_EXTERNAL_OUTPUT` | Marks the Value as a graph output. |
+
+### Nodes (operators)
+
+Nodes connect Values. Each `xnn_define_*` call adds one Node to the subgraph. For example, a 2-D convolution:
+
+```c
+uint32_t output_id;
+xnn_define_tensor_value(subgraph, xnn_datatype_fp32, 4, output_dims,
+                        NULL, /*external_id=*/2,
+                        XNN_VALUE_FLAG_EXTERNAL_OUTPUT, &output_id);
+
+xnn_define_convolution_2d(
+  subgraph,
+  /*padding_top=*/1, /*padding_right=*/1,
+  /*padding_bottom=*/1, /*padding_left=*/1,
+  /*kernel_height=*/3, /*kernel_width=*/3,
+  /*subsampling_height=*/1, /*subsampling_width=*/1,
+  /*dilation_height=*/1, /*dilation_width=*/1,
+  /*groups=*/1,
+  /*group_input_channels=*/3,
+  /*group_output_channels=*/32,
+  /*output_min=*/-INFINITY, /*output_max=*/INFINITY,
+  input_id, filter_id, bias_id, output_id,
+  /*flags=*/0);
+```
+
+Nodes are stored in definition order. The Runtime will execute them in that order (after any fusion the library decides to apply).
+
+## Runtime
+
+A Runtime (`xnn_runtime_t`) is compiled from a frozen Subgraph. It owns all internal operator objects, packed weight buffers, and intermediate tensor memory.
+
+### Creating a Runtime
+
+```c
+// Preferred API (v4): supports weights cache, shared workspace, thread pool, flags.
+xnn_runtime_t runtime = NULL;
+xnn_create_runtime_v4(
+  subgraph,
+  /*weights_cache=*/NULL,   // NULL → no weight sharing across runtimes
+  /*workspace=*/NULL,        // NULL → each runtime has its own workspace
+  threadpool,
+  /*flags=*/XNN_FLAG_HINT_FP16_INFERENCE,
+  &runtime);
+```
+
+Once created, the Runtime is completely independent of the Subgraph. The Subgraph can be deleted immediately if it is no longer needed.
+
+<Note>
+Runtime creation performs operator lowering, graph fusion, microkernel selection, and initial memory planning. This is the most expensive step — do it once and reuse the Runtime for many inferences.
+</Note>
+
+### Runtime flags
+
+| Flag | Value | Effect |
+|---|---|---|
+| `XNN_FLAG_HINT_FP16_INFERENCE` | `0x00000002` | Request FP16 execution where possible. Falls back to FP32 if the hardware does not support native FP16. |
+| `XNN_FLAG_FORCE_FP16_INFERENCE` | `0x00000004` | Require FP16 execution. Returns an error if FP16 is not available. On x86 without hardware FP16 support, FP16 is emulated at a substantial performance cost. |
+| `XNN_FLAG_HINT_SPARSE_INFERENCE` | `0x00000001` | Request sparse (fast sparse convolution) execution paths where applicable. |
+| `XNN_FLAG_BASIC_PROFILING` | `0x00000008` | Record per-operator timing. Query results with `xnn_get_runtime_profiling_info()`. |
+| `XNN_FLAG_DONT_SPIN_WORKERS` | `0x00000010` | Yield worker threads to the OS scheduler after the last operator completes, reducing power consumption between inferences. |
+| `XNN_FLAG_TRANSIENT_INDIRECTION_BUFFER` | `0x00000020` | Rebuild convolution indirection buffers on every `xnn_invoke_runtime()` call using temporary workspace memory rather than keeping persistent per-operator buffers. Reduces peak memory at the cost of a small per-inference setup overhead. |
+
+### Reshaping
+
+After creating the Runtime — and whenever input shapes change — call `xnn_reshape_runtime()` to propagate shapes through the graph and (re)allocate memory for intermediate tensors:
+
+```c
+// Optionally change an external value's shape before reshaping.
+size_t new_dims[] = {2, 224, 224, 3};  // batch size 2
+xnn_reshape_external_value(runtime, /*external_id=*/0,
+                            /*num_dims=*/4, new_dims);
+
+xnn_reshape_runtime(runtime);
+```
+
+### Setting up external buffers
+
+Bind caller-allocated input and output buffers with `xnn_setup_runtime_v2()`. Call this after `xnn_reshape_runtime()` and before `xnn_invoke_runtime()`:
+
+```c
+struct xnn_external_value externals[] = {
+  {.id = 0, .data = input_buffer},   // external input
+  {.id = 1, .data = weight_buffer},  // (if dynamic)
+  {.id = 2, .data = output_buffer},  // external output
+};
+xnn_setup_runtime_v2(runtime, 3, externals);
+```
+
+<Warning>
+Each buffer passed in `external_values` must have at least `XNN_EXTRA_BYTES` (16 bytes, or 128 bytes on Hexagon) allocated beyond the last element of the tensor. XNNPACK may read — but will never write — past the end of a buffer by up to this amount.
+</Warning>
+
+### Running inference
+
+```c
+xnn_invoke_runtime(runtime);
+```
+
+`xnn_invoke_runtime()` executes the full forward pass. It is thread-safe: multiple Runtime objects can be invoked concurrently on different threads, but a single Runtime must not be invoked from multiple threads simultaneously.
+
+### Re-using a Runtime for multiple inferences
+
+The typical production pattern is:
+
+```c
+// Setup once.
+xnn_setup_runtime_v2(runtime, num_externals, externals);
+
+// Run many times — update input_buffer content between calls.
+for (int i = 0; i < num_samples; i++) {
+  memcpy(input_buffer, samples[i], input_size);
+  xnn_invoke_runtime(runtime);
+  // read output_buffer ...
+}
+```
+
+If only the data changes (not the shapes), there is no need to call `xnn_reshape_runtime()` or `xnn_setup_runtime_v2()` again.
+
+### Profiling
+
+When `XNN_FLAG_BASIC_PROFILING` is set, timing data is collected during `xnn_invoke_runtime()` and can be queried after the call:
+
+```c
+size_t num_operators = 0;
+xnn_get_runtime_profiling_info(runtime,
+  xnn_profile_info_num_operators,
+  sizeof(num_operators), &num_operators, NULL);
+
+uint64_t timings[MAX_OPS];
+xnn_get_runtime_profiling_info(runtime,
+  xnn_profile_info_operator_timing,
+  num_operators * sizeof(uint64_t), timings, NULL);
+```
+
+### Cleanup
+
+```c
+xnn_delete_runtime(runtime);
+xnn_delete_subgraph(subgraph);
+xnn_deinitialize();
+```
+
+## Complete example
+
+The following example builds a single convolution → ReLU subgraph, runs two inference passes, and cleans up:
+
+```c
+#include <xnnpack.h>
+#include <pthreadpool.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+  // 1. Initialize XNNPACK with the default (malloc/free) allocator.
+  xnn_initialize(NULL);
+
+  // 2. Build the subgraph.
+  xnn_subgraph_t subgraph = NULL;
+  xnn_create_subgraph(/*external_value_ids=*/2, /*flags=*/0, &subgraph);
+
+  // Input: [1, 7, 7, 3]
+  uint32_t input_id;
+  size_t input_dims[] = {1, 7, 7, 3};
+  xnn_define_tensor_value(subgraph, xnn_datatype_fp32, 4, input_dims,
+                          NULL, 0, XNN_VALUE_FLAG_EXTERNAL_INPUT, &input_id);
+
+  // Weights (static): [8, 3, 3, 3]
+  static float filter_data[8 * 3 * 3 * 3 + 16 /* XNN_EXTRA_BYTES headroom */];
+  uint32_t filter_id;
+  size_t filter_dims[] = {8, 3, 3, 3};
+  xnn_define_tensor_value(subgraph, xnn_datatype_fp32, 4, filter_dims,
+                          filter_data, XNN_INVALID_VALUE_ID, 0, &filter_id);
+
+  // Output: [1, 5, 5, 8]
+  uint32_t output_id;
+  size_t output_dims[] = {1, 5, 5, 8};
+  xnn_define_tensor_value(subgraph, xnn_datatype_fp32, 4, output_dims,
+                          NULL, 1, XNN_VALUE_FLAG_EXTERNAL_OUTPUT, &output_id);
+
+  // Convolution + ReLU fused via output_min/max.
+  xnn_define_convolution_2d(
+    subgraph,
+    0, 0, 0, 0,         // no padding
+    3, 3,               // 3×3 kernel
+    1, 1,               // stride 1
+    1, 1,               // dilation 1
+    1,                  // groups
+    3,                  // group_input_channels
+    8,                  // group_output_channels
+    0.0f, INFINITY,     // output_min/max → ReLU
+    input_id, filter_id, XNN_INVALID_VALUE_ID, output_id,
+    0);
+
+  // 3. Create a runtime.
+  pthreadpool_t threadpool = pthreadpool_create(0);
+  xnn_runtime_t runtime = NULL;
+  xnn_create_runtime_v4(subgraph, NULL, NULL, threadpool,
+                        XNN_FLAG_HINT_FP16_INFERENCE, &runtime);
+  xnn_delete_subgraph(subgraph);  // no longer needed
+
+  // 4. Reshape (propagates shapes, allocates workspace).
+  xnn_reshape_runtime(runtime);
+
+  // 5. Allocate external buffers (+XNN_EXTRA_BYTES for each).
+  float* input  = malloc(1*7*7*3*sizeof(float) + XNN_EXTRA_BYTES);
+  float* output = malloc(1*5*5*8*sizeof(float) + XNN_EXTRA_BYTES);
+
+  struct xnn_external_value externals[] = {
+    {.id = 0, .data = input},
+    {.id = 1, .data = output},
+  };
+  xnn_setup_runtime_v2(runtime, 2, externals);
+
+  // 6. Run inference twice.
+  for (int i = 0; i < 2; i++) {
+    // fill input ...
+    xnn_invoke_runtime(runtime);
+    // consume output ...
+  }
+
+  // 7. Clean up.
+  free(input);
+  free(output);
+  xnn_delete_runtime(runtime);
+  pthreadpool_destroy(threadpool);
+  xnn_deinitialize();
+  return 0;
+}
+```

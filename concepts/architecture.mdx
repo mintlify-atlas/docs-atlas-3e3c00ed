@@ -1,0 +1,131 @@
+---
+title: "Architecture"
+description: "A tour of XNNPACK's layered design: microkernels, operators, subgraph, and runtime — and how ML frameworks sit on top."
+---
+
+XNNPACK is structured as a stack of four layers. Each layer builds on the one below it and exposes a progressively higher-level abstraction. Framework integrations such as TensorFlow Lite, PyTorch Mobile, and ONNX Runtime sit above the entire stack.
+
+```
+┌──────────────────────────────────────────┐
+│   Framework integrations                 │
+│   (TFLite · PyTorch · ONNX Runtime …)   │
+├──────────────────────────────────────────┤
+│   Runtime          (execution engine)    │
+├──────────────────────────────────────────┤
+│   Subgraph         (model definition)    │
+├──────────────────────────────────────────┤
+│   Operators        (convolution, pool …) │
+├──────────────────────────────────────────┤
+│   Microkernels     (SIMD / ISA kernels)  │
+└──────────────────────────────────────────┘
+```
+
+## Microkernels
+
+Microkernels are the lowest layer. Each microkernel is a tightly hand-optimised function that performs a single numerical primitive — a matrix-multiply tile (GEMM), a depthwise-convolution tile (DWCONV), a vector-activation pass, and so on — using the SIMD instruction set of a specific target architecture.
+
+<CardGroup cols={2}>
+  <Card title="ARM / ARM64" icon="microchip">
+    NEON, SVE, and SVE2 paths. Separate variants for ARMv6+VFP, ARMv7+NEON, and ARM64 with dot-product and matrix-multiply extensions.
+  </Card>
+  <Card title="x86 / x86-64" icon="microchip">
+    SSE2 through AVX-512 (VNNI, BF16, FP16) paths, selected at runtime via CPUID.
+  </Card>
+  <Card title="WebAssembly" icon="globe">
+    MVP scalar path plus SIMD128 and Relaxed-SIMD paths, chosen at load time.
+  </Card>
+  <Card title="RISC-V & Hexagon" icon="microchip">
+    RV32GC/RV64GC scalar paths and Hexagon HVX vector paths (`XNN_EXTRA_BYTES` is 128 on Hexagon vs. the normal 16).
+  </Card>
+</CardGroup>
+
+Microkernels are selected at `xnn_initialize()` time. The selection is stored in global config tables and referenced by the operator layer. Application code never calls microkernels directly.
+
+## Operators
+
+The operator layer wraps one or more microkernels behind a clean create / reshape / setup / run lifecycle:
+
+```c
+// 1. Create — allocate and configure the operator object
+xnn_operator_t op;
+xnn_create_convolution2d_nhwc_f32(..., &op);
+
+// 2. Reshape — propagate shapes, compute tile counts
+xnn_reshape_convolution2d_nhwc_f32(op, batch, height, width, ..., threadpool);
+
+// 3. Setup — bind input/output pointers
+xnn_setup_convolution2d_nhwc_f32(op, input, output);
+
+// 4. Run
+xnn_run_operator(op, threadpool);
+
+// 5. Destroy
+xnn_delete_operator(op);
+```
+
+Operators implement the full set of neural-network building blocks listed in the README:
+
+- **Convolution** — standard 2-D, depthwise, grouped, deconvolution (transposed)
+- **Pooling** — average, max, argmax, global average, unpooling
+- **Element-wise** — add, subtract, multiply, divide, maximum, minimum, squared difference (all with broadcasting)
+- **Activations** — clamp/ReLU/ReLU6, ELU, sigmoid, tanh, HardSwish, leaky ReLU, GELU
+- **Linear** — fully connected, batch matrix multiply
+- **Spatial** — bilinear resize, depth-to-space, space-to-depth, transpose, slice
+- **Normalisation** — softmax, channel shuffle, PReLU
+
+### NHWC layout and custom channel strides
+
+All operators natively consume and produce tensors in **NHWC** order (batch × height × width × channels). Operators also accept a custom `input_pixel_stride` and `output_pixel_stride` parameter. Setting these strides to values larger than the channel count lets an operator read from, or write to, a *subset* of channels inside a wider buffer — enabling zero-copy channel-split and channel-concatenation without moving data.
+
+## Subgraph
+
+The subgraph layer provides a declarative, framework-independent way to describe a complete neural network model as a dataflow graph.
+
+<CardGroup cols={2}>
+  <Card title="Values (tensors)" icon="database">
+    Each `xnn_value` carries a datatype, shape (up to `XNN_MAX_TENSOR_DIMS` = 6 dimensions), optional static data pointer, and identity flags (`XNN_VALUE_FLAG_EXTERNAL_INPUT`, `XNN_VALUE_FLAG_EXTERNAL_OUTPUT`). Values are identified by a `uint32_t` ID.
+  </Card>
+  <Card title="Nodes (operators)" icon="circle-nodes">
+    Each `xnn_node` records the operator type, its hyperparameters, and the IDs of its input and output Values. Nodes are added with `xnn_define_*` calls such as `xnn_define_convolution_2d()`.
+  </Card>
+</CardGroup>
+
+The subgraph is a pure *definition* object — it holds no mutable execution state. The same subgraph can be compiled into multiple independent Runtime objects, for example to run two models in parallel on different thread pools.
+
+## Runtime
+
+The runtime layer takes a frozen subgraph, compiles it into an executable plan, and manages memory for all intermediate tensors.
+
+<Steps>
+  <Step title="Operator lowering">
+    Each subgraph Node is lowered to one or more concrete operator objects, with microkernels resolved against the current hardware config.
+  </Step>
+  <Step title="Graph optimisation">
+    Operator fusion and other graph-level transformations are applied — for example, a convolution followed by a batch-normalisation and a ReLU may be folded into a single fused operator.
+  </Step>
+  <Step title="Memory planning">
+    The memory planner analyses the lifetime (first-use node → last-use node) of every intermediate Value. Tensors with non-overlapping lifetimes are allowed to share the same backing allocation, minimising peak memory usage. This algorithm is described in [Pisarchyk & Lee, 2020](https://arxiv.org/abs/2001.03288).
+  </Step>
+  <Step title="Execution">
+    `xnn_invoke_runtime()` walks the execution plan sequentially, running each operator in order. Parallelism within each operator is handled by the `pthreadpool` thread pool passed at creation time.
+  </Step>
+</Steps>
+
+For the full programming model — including how to create a subgraph, build a runtime, and run inference — see [Subgraph & Runtime](/concepts/subgraph-runtime).
+
+## Framework integrations
+
+Framework integrations live entirely above the subgraph/runtime layer. They translate their own intermediate representations into XNNPACK subgraph definitions:
+
+| Framework | Integration |
+|---|---|
+| TensorFlow Lite | XNNPACK delegate — replaces supported ops in a TFLite model |
+| TensorFlow.js | WebAssembly backend |
+| PyTorch Mobile | `torch.backends.xnnpack` |
+| ONNX Runtime | XNNPACK execution provider |
+| ExecuTorch | XNNPACK backend |
+| MediaPipe | Web inference backend |
+
+<Note>
+XNNPACK is a low-level library. It is not intended to be used directly by deep learning practitioners. Framework integrations are the recommended way to benefit from XNNPACK's optimised kernels.
+</Note>

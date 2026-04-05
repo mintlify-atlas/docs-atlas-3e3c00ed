@@ -1,0 +1,233 @@
+---
+title: "Memory Management"
+description: "How XNNPACK allocates memory by default, how to supply a custom allocator, and the conventions callers must follow when passing tensor buffers."
+---
+
+XNNPACK gives you precise control over how memory is obtained and released. The default path uses the system allocator (`malloc`/`free`). A custom `xnn_allocator` can replace it — useful for memory arenas, memory-mapped buffers, or constrained embedded environments. On top of that, XNNPACK implements a graph-level memory planner that minimises the peak memory required for intermediate tensors.
+
+## Default allocation
+
+If `xnn_initialize()` is called with a `NULL` allocator, XNNPACK uses the platform's standard `malloc`, `realloc`, `free`, and `posix_memalign` / `_aligned_malloc` for all internal allocations. This covers:
+
+- Operator objects
+- Packed weight buffers
+- Intermediate activation tensors (managed by the memory planner)
+- Indirection buffers used by convolution
+
+No global state is allocated before `xnn_initialize()` is called, and no memory is retained after `xnn_deinitialize()` returns.
+
+## Custom allocators
+
+Replace the default allocator by passing a populated `struct xnn_allocator` to `xnn_initialize()`:
+
+```c
+struct xnn_allocator {
+  void* context;
+
+  // General allocation (like malloc).
+  void* (*allocate)(void* context, size_t size);
+
+  // General reallocation (like realloc).
+  // Must not free the old block if allocation fails; must return NULL in that case.
+  void* (*reallocate)(void* context, void* pointer, size_t size);
+
+  // General deallocation (like free). No-op if pointer is NULL.
+  void (*deallocate)(void* context, void* pointer);
+
+  // Alignment-constrained allocation. alignment is always a power of two.
+  void* (*aligned_allocate)(void* context, size_t alignment, size_t size);
+
+  // Deallocation of aligned blocks. No-op if pointer is NULL.
+  void (*aligned_deallocate)(void* context, void* pointer);
+};
+```
+
+All five function pointers must be set. XNNPACK stores the allocator by value at `xnn_initialize()` time; the `context` pointer is passed as the first argument to every subsequent call.
+
+<Warning>
+The `reallocate` function must follow a strict contract: if reallocation fails, it must return `NULL` but **must not free** the original block. This differs from some implementations of `realloc` in the wild, which may free the old block even on failure.
+</Warning>
+
+### Example: slab arena allocator
+
+```c
+#include <xnnpack.h>
+#include <stdint.h>
+#include <string.h>
+
+typedef struct {
+  uint8_t* base;
+  size_t   capacity;
+  size_t   used;
+} arena_t;
+
+static void* arena_allocate(void* ctx, size_t size) {
+  arena_t* a = (arena_t*)ctx;
+  // Align to 16 bytes.
+  size = (size + 15u) & ~15u;
+  if (a->used + size > a->capacity) return NULL;
+  void* ptr = a->base + a->used;
+  a->used += size;
+  return ptr;
+}
+
+static void* arena_reallocate(void* ctx, void* ptr, size_t size) {
+  // Simple arenas don't support resize; allocate a new block.
+  void* new_ptr = arena_allocate(ctx, size);
+  if (new_ptr && ptr) {
+    // Copy the minimum of old and new sizes (size is the new size).
+    memcpy(new_ptr, ptr, size);
+  }
+  return new_ptr;
+}
+
+static void arena_deallocate(void* ctx, void* ptr) { (void)ctx; (void)ptr; }
+
+static void* arena_aligned_allocate(void* ctx, size_t align, size_t size) {
+  arena_t* a = (arena_t*)ctx;
+  size_t pad = (align - ((uintptr_t)(a->base + a->used) % align)) % align;
+  a->used += pad;
+  return arena_allocate(ctx, size);
+}
+
+static void arena_aligned_deallocate(void* ctx, void* ptr) { (void)ctx; (void)ptr; }
+
+// Usage:
+static uint8_t slab[16 * 1024 * 1024];  // 16 MB arena
+arena_t arena = { .base = slab, .capacity = sizeof(slab), .used = 0 };
+
+struct xnn_allocator custom_alloc = {
+  .context            = &arena,
+  .allocate           = arena_allocate,
+  .reallocate         = arena_reallocate,
+  .deallocate         = arena_deallocate,
+  .aligned_allocate   = arena_aligned_allocate,
+  .aligned_deallocate = arena_aligned_deallocate,
+};
+
+xnn_initialize(&custom_alloc);
+```
+
+<Tip>
+The custom allocator only needs to handle XNNPACK's own internal allocations. Caller-side input/output buffers are owned by the caller and are never passed to the allocator.
+</Tip>
+
+## Caller buffer conventions
+
+### XNN_EXTRA_BYTES
+
+XNNPACK's SIMD kernels load data in fixed-width vector registers. To avoid bounds-checking overhead inside the kernels, XNNPACK may read up to `XNN_EXTRA_BYTES` bytes past the end of any tensor buffer passed by the caller.
+
+```c
+// Standard platforms
+#define XNN_EXTRA_BYTES 16
+
+// Hexagon (HVX uses 128-byte vectors)
+#define XNN_EXTRA_BYTES 128  // when XNN_ARCH_HEXAGON is defined
+```
+
+Every buffer you pass to XNNPACK — including input tensors, output tensors, and static weight data — must be allocated with at least `XNN_EXTRA_BYTES` of readable memory beyond the final element:
+
+```c
+size_t tensor_bytes = num_elements * sizeof(float);
+float* buf = malloc(tensor_bytes + XNN_EXTRA_BYTES);
+// ✓ Safe: XNNPACK may read up to buf[num_elements + 3] for XNN_EXTRA_BYTES=16.
+```
+
+XNNPACK will never *write* past the end of a buffer.
+
+### XNN_EXTRA_QUANTIZATION_PARAMS
+
+When passing an array of `xnn_quantization_params` to operator APIs, allocate at least `XNN_EXTRA_QUANTIZATION_PARAMS` (15) extra entries after the last valid entry:
+
+```c
+#define XNN_EXTRA_QUANTIZATION_PARAMS 15
+
+size_t num_channels = 64;
+struct xnn_quantization_params* params =
+  malloc((num_channels + XNN_EXTRA_QUANTIZATION_PARAMS) * sizeof(*params));
+// populate params[0] … params[num_channels - 1], leave the rest uninitialised
+```
+
+This follows the same rationale as `XNN_EXTRA_BYTES`: vectorised scale-application loops may overshoot the last channel by up to 15 entries.
+
+## Memory planning
+
+When a Runtime is created from a Subgraph, the memory planner analyses the lifetime of every internal (XNNPACK-managed) Value:
+
+<Steps>
+  <Step title="Lifecycle analysis">
+    For each internal tensor, the planner records the index of the first node that produces it (`first_node`) and the last node that consumes it (`last_node`). This is the tensor's *live interval*.
+  </Step>
+  <Step title="Conflict detection">
+    Two tensors *conflict* if their live intervals overlap: `a.last_node >= b.first_node`. Conflicting tensors cannot share memory.
+  </Step>
+  <Step title="Memory assignment (largest-first)">
+    Tensors are sorted by size in decreasing order. Each tensor is assigned an offset within a shared scratch buffer such that it does not overlap (in both time and space) with any previously placed tensor. This greedy algorithm tends to minimise peak allocation without requiring backtracking.
+  </Step>
+  <Step title="Single allocation">
+    The planner makes a single contiguous allocation for all internal tensors. The Runtime holds one pointer to this scratch buffer; individual tensors receive offsets into it.
+  </Step>
+</Steps>
+
+This approach is described in detail in [Pisarchyk & Lee, "Efficient Memory Management for Deep Neural Net Inference" (2020)](https://arxiv.org/abs/2001.03288).
+
+<Note>
+The memory planner only applies to *internal* Values. External Values — those with `XNN_VALUE_FLAG_EXTERNAL_INPUT` or `XNN_VALUE_FLAG_EXTERNAL_OUTPUT` — are always backed by caller-provided buffers and are never included in the planner's scratch allocation.
+</Note>
+
+### Enabling memory optimisation at build time
+
+Memory planning is on by default. It can be disabled at CMake/Bazel build time via:
+
+```bash
+# CMake
+cmake -DXNNPACK_ENABLE_MEMOPT=OFF ...
+
+# Bazel
+bazel build --define xnnpack_enable_memopt=false ...
+```
+
+Disabling memory optimisation gives each internal tensor its own independent allocation, which can be useful for debugging to verify that tensors are not incorrectly sharing memory.
+
+## Transient indirection buffer
+
+Convolution in XNNPACK uses an *indirection buffer* — a list of input-pointer tuples, one per output element — to implement the indirect convolution algorithm. By default, this buffer is allocated once per Runtime and kept for the Runtime's lifetime, which is optimal for throughput at the cost of some persistent memory.
+
+Setting `XNN_FLAG_TRANSIENT_INDIRECTION_BUFFER` at Runtime creation time changes this: the indirection buffer is rebuilt on every `xnn_invoke_runtime()` call using temporary workspace memory rather than a persistent allocation.
+
+```c
+xnn_create_runtime_v4(
+  subgraph, NULL, NULL, threadpool,
+  XNN_FLAG_TRANSIENT_INDIRECTION_BUFFER,
+  &runtime);
+```
+
+**Trade-off:** lower peak memory footprint, but a small per-inference overhead to rebuild the indirection pointers on each call. Prefer this flag when the application invokes inference infrequently or has very tight memory constraints.
+
+## Shared workspace
+
+Multiple Runtime objects can share a single workspace object, allowing them to reuse the same scratch buffer for internal tensors:
+
+```c
+xnn_workspace_t workspace = NULL;
+xnn_create_workspace(&workspace);
+
+xnn_runtime_t runtime_a = NULL;
+xnn_create_runtime_v4(subgraph_a, NULL, workspace, threadpool, 0, &runtime_a);
+
+xnn_runtime_t runtime_b = NULL;
+xnn_create_runtime_v4(subgraph_b, NULL, workspace, threadpool, 0, &runtime_b);
+
+// runtime_a and runtime_b share the workspace buffer.
+// The workspace grows to accommodate the largest runtime's needs.
+// Only one runtime should be active (invoking) at a time.
+
+xnn_delete_runtime(runtime_a);
+xnn_delete_runtime(runtime_b);
+xnn_release_workspace(workspace);  // freed only after all runtimes are deleted
+```
+
+<Warning>
+A shared workspace is not thread-safe for concurrent `xnn_invoke_runtime()` calls. If you need to run two models simultaneously, give each Runtime its own workspace (pass `NULL`).
+</Warning>

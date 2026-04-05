@@ -1,28 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "XNNPACK",
+  "projectType": "ai-ml",
+  "projectName": "XNNPACK",
+  "projectDescription": "A highly optimized library of neural network inference operators for ARM, x86, WebAssembly, and RISC-V platforms, used as a low-level backend by TensorFlow Lite, PyTorch, ONNX Runtime, and other ML frameworks.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#f88c0b",
-    "light": "#f1cc79",
-    "dark": "#445464"
-  },
-  "favicon": "https://media.brand.dev/c84ae0f0-3dc6-4769-878a-2a5e9e1a315e.jpg",
-  "logo": {
-    "light": "https://media.brand.dev/2211b8c5-4661-4325-abac-1ed6df1f7a5e.svg",
-    "dark": "https://media.brand.dev/2211b8c5-4661-4325-abac-1ed6df1f7a5e.svg"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/google/XNNPACK"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/google/XNNPACK"
-    }
-  },
+  "primaryColor": "#f88c0b",
+  "lightColor": "#f1cc79",
+  "darkColor": "#445464",
   "navigation": {
     "tabs": [
       {
@@ -98,5 +81,42 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Highly optimized neural network inference for ARM, x86, WebAssembly, and RISC-V",
+    "Multi-platform SIMD acceleration (NEON, AVX512, WebAssembly SIMD, HVX)",
+    "Subgraph-based API for defining and running full neural network models",
+    "Support for FP32, FP16, BF16, INT8 (QS8/QU8), and 4-bit quantized inference",
+    "Sparse inference and memory-optimized runtime execution",
+    "Multi-threaded inference via pthreadpool",
+    "Indirect convolution algorithm for cache-efficient computation",
+    "30+ neural network operators including convolution, pooling, elementwise, and matrix multiply",
+    "Used by TensorFlow Lite, PyTorch Mobile, ONNX Runtime, MediaPipe, and TensorFlow.js"
+  ],
+  "publicApiSurface": [
+    "xnn_initialize()",
+    "xnn_deinitialize()",
+    "xnn_create_subgraph()",
+    "xnn_delete_subgraph()",
+    "xnn_define_tensor_value()",
+    "xnn_define_quantized_tensor_value()",
+    "xnn_define_channelwise_quantized_tensor_value()",
+    "xnn_define_convolution_2d()",
+    "xnn_define_depthwise_convolution_2d()",
+    "xnn_define_fully_connected()",
+    "xnn_define_average_pooling_2d()",
+    "xnn_define_max_pooling_2d()",
+    "xnn_define_softmax()",
+    "xnn_create_runtime()",
+    "xnn_setup_runtime()",
+    "xnn_invoke_runtime()",
+    "xnn_delete_runtime()",
+    "enum xnn_status",
+    "enum xnn_datatype",
+    "struct xnn_allocator",
+    "XNN_FLAG_HINT_FP16_INFERENCE",
+    "XNN_FLAG_FORCE_FP16_INFERENCE",
+    "XNN_FLAG_HINT_SPARSE_INFERENCE",
+    "XNN_FLAG_BASIC_PROFILING"
+  ]
 }

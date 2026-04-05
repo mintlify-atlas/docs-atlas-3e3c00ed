@@ -1,97 +1,73 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "XNNPACK"
+description: "High-efficiency neural network inference operators for ARM, x86, WebAssembly, and RISC-V — powering TensorFlow Lite, PyTorch, ONNX Runtime, and more."
 ---
 
-## Setting up
+XNNPACK is a highly optimized library of neural network inference operators for mobile, server, and Web platforms. It provides low-level performance primitives for accelerating high-level machine learning frameworks across ARM64, ARMv7, x86/x86-64, WebAssembly, RISC-V, and Hexagon architectures.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Learn what XNNPACK is, what platforms it supports, and how it fits into the ML ecosystem.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build and run your first neural network inference with XNNPACK in minutes.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Building XNNPACK" icon="hammer" href="/building">
+    Configure and build XNNPACK with CMake, Bazel, or GN for your target platform.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api/initialization">
+    Explore the full C API — from initialization to operator definition and runtime execution.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why XNNPACK?
 
-Everything you need to create world-class documentation.
+XNNPACK delivers state-of-the-art inference performance through hand-tuned SIMD microkernels, efficient memory layouts, and an optimizing subgraph runtime.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={3}>
+  <Card title="Multi-platform SIMD" icon="microchip">
+    Optimized kernels for NEON, AVX512, WebAssembly SIMD, and Hexagon HVX.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Multiple data types" icon="binary">
+    FP32, FP16, BF16, INT8 (QS8/QU8), and 4-bit quantized inference.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Multi-threaded" icon="layer-group">
+    Parallel inference via pthreadpool across all big cores.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+</CardGroup>
 
-## Need inspiration?
+## Explore the docs
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<CardGroup cols={2}>
+  <Card title="Concepts" icon="lightbulb" href="/concepts/architecture">
+    Understand the architecture, subgraph/runtime model, quantization, and memory management.
+  </Card>
+  <Card title="Operators" icon="function" href="/operators/overview">
+    Browse all 30+ supported neural network operators with usage details.
+  </Card>
+  <Card title="Internals" icon="gears" href="/internals/microkernels">
+    Deep dive into microkernels, naming conventions, and the indirection buffer.
+  </Card>
+  <Card title="Integration" icon="puzzle-piece" href="/integration/framework-integration">
+    Integrate XNNPACK with TensorFlow Lite, PyTorch, ONNX Runtime, and WebAssembly.
+  </Card>
+</CardGroup>
+
+## Framework integrations
+
+XNNPACK is used as a backend by major ML frameworks:
+
+<CardGroup cols={2}>
+  <Card title="TensorFlow Lite" icon="bolt" href="/integration/framework-integration">
+    Default high-performance backend for on-device inference.
+  </Card>
+  <Card title="PyTorch Mobile" icon="fire" href="/integration/framework-integration">
+    Accelerates mobile inference in PyTorch ExecuTorch.
+  </Card>
+  <Card title="ONNX Runtime" icon="diagram-project" href="/integration/framework-integration">
+    Available as the XNNPACK Execution Provider.
+  </Card>
+  <Card title="WebAssembly" icon="globe" href="/integration/webassembly">
+    Powers TensorFlow.js WebAssembly backend with SIMD acceleration.
+  </Card>
+</CardGroup>

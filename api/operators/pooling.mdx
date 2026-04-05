@@ -1,0 +1,522 @@
+---
+title: "Pooling Operator API"
+description: "Reference documentation for average pooling, global average pooling, max pooling, argmax pooling, and unpooling subgraph node functions."
+---
+
+# Pooling Operators
+
+XNNPACK provides five pooling variants through the Subgraph API. Each adds a Node to a
+`xnn_subgraph_t` that is later compiled into a `xnn_runtime_t` and invoked.
+
+All functions return `xnn_status_success` on success, or a non-zero `xnn_status` code on failure.
+
+---
+
+## `xnn_define_average_pooling_2d`
+
+Define a 2D Average Pooling Node and add it to a Subgraph.
+
+Computes the average of elements within each pooling window across all input channels.
+
+```c
+enum xnn_status xnn_define_average_pooling_2d(
+  xnn_subgraph_t subgraph,
+  uint32_t input_padding_top,
+  uint32_t input_padding_right,
+  uint32_t input_padding_bottom,
+  uint32_t input_padding_left,
+  uint32_t pooling_height,
+  uint32_t pooling_width,
+  uint32_t stride_height,
+  uint32_t stride_width,
+  float output_min,
+  float output_max,
+  uint32_t input_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+### Parameters
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph object that will own the created Node.
+</ParamField>
+
+<ParamField path="input_padding_top" type="uint32_t" required>
+  Implicit zero-padding above 2D input data. Must be `0` if `XNN_FLAG_TENSORFLOW_SAME_PADDING` is specified.
+</ParamField>
+
+<ParamField path="input_padding_right" type="uint32_t" required>
+  Implicit zero-padding to the right of 2D input data. Must be `0` if `XNN_FLAG_TENSORFLOW_SAME_PADDING` is specified.
+</ParamField>
+
+<ParamField path="input_padding_bottom" type="uint32_t" required>
+  Implicit zero-padding below 2D input data. Must be `0` if `XNN_FLAG_TENSORFLOW_SAME_PADDING` is specified.
+</ParamField>
+
+<ParamField path="input_padding_left" type="uint32_t" required>
+  Implicit zero-padding to the left of 2D input data. Must be `0` if `XNN_FLAG_TENSORFLOW_SAME_PADDING` is specified.
+</ParamField>
+
+<ParamField path="pooling_height" type="uint32_t" required>
+  Pooling window (kernel) height.
+</ParamField>
+
+<ParamField path="pooling_width" type="uint32_t" required>
+  Pooling window (kernel) width.
+</ParamField>
+
+<ParamField path="stride_height" type="uint32_t" required>
+  Vertical displacement of the pooling window between vertically adjacent output pixels.
+</ParamField>
+
+<ParamField path="stride_width" type="uint32_t" required>
+  Horizontal displacement of the pooling window between horizontally adjacent output pixels.
+</ParamField>
+
+<ParamField path="output_min" type="float" required>
+  Lower bound for clamping output values. Use `-INFINITY` to disable.
+</ParamField>
+
+<ParamField path="output_max" type="float" required>
+  Upper bound for clamping output values. Use `+INFINITY` to disable.
+</ParamField>
+
+<ParamField path="input_id" type="uint32_t" required>
+  Value ID for the input tensor. Must be a 4D tensor of shape `[N, IH, IW, channels]`.
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID for the output tensor. Must be a 4D tensor of shape `[N, OH, OW, channels]`.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Bitfield of behavioral flags. `XNN_FLAG_TENSORFLOW_SAME_PADDING` is supported.
+</ParamField>
+
+### Output Clamping
+
+After pooling, every output element `y` is transformed as:
+
+```
+y = clamp(y, output_min, output_max)
+```
+
+This allows fused activation functions such as ReLU (`output_min=0`, `output_max=+∞`).
+
+### Usage Example
+
+```c
+#include <xnnpack.h>
+#include <math.h>
+
+enum xnn_status status = xnn_define_average_pooling_2d(
+  subgraph,
+  /*input_padding_top=*/    0,
+  /*input_padding_right=*/  0,
+  /*input_padding_bottom=*/ 0,
+  /*input_padding_left=*/   0,
+  /*pooling_height=*/       3,
+  /*pooling_width=*/        3,
+  /*stride_height=*/        2,
+  /*stride_width=*/         2,
+  /*output_min=*/           -INFINITY,
+  /*output_max=*/           +INFINITY,
+  input_id,
+  output_id,
+  /*flags=*/                0);
+```
+
+---
+
+## `xnn_define_global_average_pooling_2d`
+
+Define a 2D Global Average Pooling Node and add it to a Subgraph.
+
+Averages all spatial positions (entire height and width) for each channel in the input, reducing
+a 4D tensor to its channel-only representation.
+
+<Warning>
+  This function is deprecated. Prefer `xnn_define_static_reduce` with `xnn_reduce_mean` and the
+  appropriate reduction axes.
+</Warning>
+
+```c
+XNN_DEPRECATED enum xnn_status xnn_define_global_average_pooling_2d(
+  xnn_subgraph_t subgraph,
+  float output_min,
+  float output_max,
+  uint32_t input_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+### Parameters
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph object that will own the created Node.
+</ParamField>
+
+<ParamField path="output_min" type="float" required>
+  Lower bound for clamping output values.
+</ParamField>
+
+<ParamField path="output_max" type="float" required>
+  Upper bound for clamping output values.
+</ParamField>
+
+<ParamField path="input_id" type="uint32_t" required>
+  Value ID for the input tensor. Must be a dense tensor with 3 or more dimensions. Averaging is
+  performed across the second- and third-innermost dimensions (H and W in NHWC).
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID for the output tensor. Must be a dense tensor with 3 or more dimensions.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Bitfield of behavioral flags. `XNN_FLAG_KEEP_DIMS` retains the reduced dimensions with length 1.
+</ParamField>
+
+### Usage Example
+
+```c
+// Global average pool: [N, H, W, C] -> [N, 1, 1, C] (with KEEP_DIMS)
+enum xnn_status status = xnn_define_global_average_pooling_2d(
+  subgraph,
+  /*output_min=*/ -INFINITY,
+  /*output_max=*/ +INFINITY,
+  input_id,
+  output_id,
+  /*flags=*/      XNN_FLAG_KEEP_DIMS);
+```
+
+---
+
+## `xnn_define_max_pooling_2d`
+
+Define a 2D Max Pooling Node and add it to a Subgraph.
+
+Computes the maximum element within each pooling window, optionally with dilation and output
+value clamping.
+
+```c
+enum xnn_status xnn_define_max_pooling_2d(
+  xnn_subgraph_t subgraph,
+  uint32_t input_padding_top,
+  uint32_t input_padding_right,
+  uint32_t input_padding_bottom,
+  uint32_t input_padding_left,
+  uint32_t pooling_height,
+  uint32_t pooling_width,
+  uint32_t stride_height,
+  uint32_t stride_width,
+  uint32_t dilation_height,
+  uint32_t dilation_width,
+  float output_min,
+  float output_max,
+  uint32_t input_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+### Parameters
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph object that will own the created Node.
+</ParamField>
+
+<ParamField path="input_padding_top" type="uint32_t" required>
+  Implicit zero-padding above 2D input data. Must be `0` if `XNN_FLAG_TENSORFLOW_SAME_PADDING` is specified.
+</ParamField>
+
+<ParamField path="input_padding_right" type="uint32_t" required>
+  Implicit zero-padding to the right of 2D input data. Must be `0` if `XNN_FLAG_TENSORFLOW_SAME_PADDING` is specified.
+</ParamField>
+
+<ParamField path="input_padding_bottom" type="uint32_t" required>
+  Implicit zero-padding below 2D input data. Must be `0` if `XNN_FLAG_TENSORFLOW_SAME_PADDING` is specified.
+</ParamField>
+
+<ParamField path="input_padding_left" type="uint32_t" required>
+  Implicit zero-padding to the left of 2D input data. Must be `0` if `XNN_FLAG_TENSORFLOW_SAME_PADDING` is specified.
+</ParamField>
+
+<ParamField path="pooling_height" type="uint32_t" required>
+  Pooling window (kernel) height.
+</ParamField>
+
+<ParamField path="pooling_width" type="uint32_t" required>
+  Pooling window (kernel) width.
+</ParamField>
+
+<ParamField path="stride_height" type="uint32_t" required>
+  Vertical stride between pooling windows.
+</ParamField>
+
+<ParamField path="stride_width" type="uint32_t" required>
+  Horizontal stride between pooling windows.
+</ParamField>
+
+<ParamField path="dilation_height" type="uint32_t" required>
+  Dilation of pooling elements along the height dimension. A value of `1` means no dilation.
+</ParamField>
+
+<ParamField path="dilation_width" type="uint32_t" required>
+  Dilation of pooling elements along the width dimension.
+</ParamField>
+
+<ParamField path="output_min" type="float" required>
+  Lower bound for clamping output values. Use `-INFINITY` to disable.
+</ParamField>
+
+<ParamField path="output_max" type="float" required>
+  Upper bound for clamping output values. Use `+INFINITY` to disable.
+</ParamField>
+
+<ParamField path="input_id" type="uint32_t" required>
+  Value ID for the input tensor. Must be a 4D tensor of shape `[N, IH, IW, channels]`.
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID for the output tensor. Must be a 4D tensor of shape `[N, OH, OW, channels]`.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Bitfield of behavioral flags. `XNN_FLAG_TENSORFLOW_SAME_PADDING` is supported.
+</ParamField>
+
+### Output Clamping
+
+The max-pooling output is clamped element-wise:
+
+```
+y = clamp(max_in_window, output_min, output_max)
+```
+
+This is useful for fusing operations such as ReLU after pooling at no additional cost.
+
+### Usage Example
+
+```c
+enum xnn_status status = xnn_define_max_pooling_2d(
+  subgraph,
+  /*input_padding_top=*/    1,
+  /*input_padding_right=*/  1,
+  /*input_padding_bottom=*/ 1,
+  /*input_padding_left=*/   1,
+  /*pooling_height=*/       3,
+  /*pooling_width=*/        3,
+  /*stride_height=*/        2,
+  /*stride_width=*/         2,
+  /*dilation_height=*/      1,
+  /*dilation_width=*/       1,
+  /*output_min=*/           0.0f,   // fused ReLU
+  /*output_max=*/           +INFINITY,
+  input_id,
+  output_id,
+  /*flags=*/                0);
+```
+
+---
+
+## `xnn_define_argmax_pooling_2d`
+
+Define a 2D ArgMax Pooling Node and add it to a Subgraph.
+
+Computes the maximum value in each non-overlapping pooling window **and** the flat index
+(within the window) at which that maximum occurs. These are written to two separate output
+tensors, which can later be consumed by `xnn_define_unpooling_2d`.
+
+```c
+enum xnn_status xnn_define_argmax_pooling_2d(
+  xnn_subgraph_t subgraph,
+  uint32_t input_padding_top,
+  uint32_t input_padding_right,
+  uint32_t input_padding_bottom,
+  uint32_t input_padding_left,
+  uint32_t pooling_height,
+  uint32_t pooling_width,
+  uint32_t input_id,
+  uint32_t output_value_id,
+  uint32_t output_index_id,
+  uint32_t flags);
+```
+
+### Parameters
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph object that will own the created Node.
+</ParamField>
+
+<ParamField path="input_padding_top" type="uint32_t" required>
+  Implicit zero-padding above 2D input data.
+</ParamField>
+
+<ParamField path="input_padding_right" type="uint32_t" required>
+  Implicit zero-padding to the right of 2D input data.
+</ParamField>
+
+<ParamField path="input_padding_bottom" type="uint32_t" required>
+  Implicit zero-padding below 2D input data.
+</ParamField>
+
+<ParamField path="input_padding_left" type="uint32_t" required>
+  Implicit zero-padding to the left of 2D input data.
+</ParamField>
+
+<ParamField path="pooling_height" type="uint32_t" required>
+  Pooling window height. The vertical stride between pooling regions equals this value (no stride parameter — windows are non-overlapping).
+</ParamField>
+
+<ParamField path="pooling_width" type="uint32_t" required>
+  Pooling window width. The horizontal stride between pooling regions equals this value.
+</ParamField>
+
+<ParamField path="input_id" type="uint32_t" required>
+  Value ID for the input tensor. Must be a 4D tensor of shape `[N, IH, IW, channels]`.
+</ParamField>
+
+<ParamField path="output_value_id" type="uint32_t" required>
+  Value ID for the output tensor containing the maximum values in each pool. Must be a 4D tensor
+  of shape `[N, OH, OW, channels]`.
+</ParamField>
+
+<ParamField path="output_index_id" type="uint32_t" required>
+  Value ID for the output tensor containing the flat index of the maximum within each pooling
+  window. Must be a 4D tensor of shape `[N, OH, OW, channels]`.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Bitfield of behavioral flags. No flags are currently defined; pass `0`.
+</ParamField>
+
+<Note>
+  ArgMax Pooling uses **non-overlapping** windows (stride equals pool size) and does not support
+  `XNN_FLAG_TENSORFLOW_SAME_PADDING`. The index output is used exclusively as input to
+  `xnn_define_unpooling_2d`.
+</Note>
+
+### Usage Example
+
+```c
+uint32_t pool_values_id, pool_indices_id;
+// ... define pool_values_id and pool_indices_id tensors ...
+
+enum xnn_status status = xnn_define_argmax_pooling_2d(
+  subgraph,
+  /*input_padding_top=*/    0,
+  /*input_padding_right=*/  0,
+  /*input_padding_bottom=*/ 0,
+  /*input_padding_left=*/   0,
+  /*pooling_height=*/       2,
+  /*pooling_width=*/        2,
+  input_id,
+  pool_values_id,
+  pool_indices_id,
+  /*flags=*/                0);
+```
+
+---
+
+## `xnn_define_unpooling_2d`
+
+Define a 2D UnPooling Node and add it to a Subgraph.
+
+Inverts a 2D ArgMax Pooling operation: places each maximum value from the pooling output back
+into the position identified by its index, and fills all other positions with zero.
+
+```c
+enum xnn_status xnn_define_unpooling_2d(
+  xnn_subgraph_t subgraph,
+  uint32_t padding_top,
+  uint32_t padding_right,
+  uint32_t padding_bottom,
+  uint32_t padding_left,
+  uint32_t pooling_height,
+  uint32_t pooling_width,
+  uint32_t input_value_id,
+  uint32_t input_index_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+### Parameters
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph object that will own the created Node.
+</ParamField>
+
+<ParamField path="padding_top" type="uint32_t" required>
+  Implicit padding removed from the top of the 2D output.
+</ParamField>
+
+<ParamField path="padding_right" type="uint32_t" required>
+  Implicit padding removed from the right of the 2D output.
+</ParamField>
+
+<ParamField path="padding_bottom" type="uint32_t" required>
+  Implicit padding removed from the bottom of the 2D output.
+</ParamField>
+
+<ParamField path="padding_left" type="uint32_t" required>
+  Implicit padding removed from the left of the 2D output.
+</ParamField>
+
+<ParamField path="pooling_height" type="uint32_t" required>
+  Height of the pooling window used during the corresponding ArgMax Pooling operation.
+</ParamField>
+
+<ParamField path="pooling_width" type="uint32_t" required>
+  Width of the pooling window used during the corresponding ArgMax Pooling operation.
+</ParamField>
+
+<ParamField path="input_value_id" type="uint32_t" required>
+  Value ID for the input tensor containing the max-pooling values to invert. Must be a 4D tensor
+  of shape `[N, IH, IW, channels]`.
+</ParamField>
+
+<ParamField path="input_index_id" type="uint32_t" required>
+  Value ID for the input tensor containing the per-pool maximum indices produced by a preceding
+  `xnn_define_argmax_pooling_2d` node. Must be a 4D tensor of shape `[N, IH, IW, channels]`.
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID for the output tensor. Must be a 4D tensor of shape `[N, OH, OW, channels]`.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Bitfield of behavioral flags. No flags are currently defined; pass `0`.
+</ParamField>
+
+### Usage Example
+
+```c
+// Pair xnn_define_argmax_pooling_2d output with xnn_define_unpooling_2d
+enum xnn_status status = xnn_define_unpooling_2d(
+  subgraph,
+  /*padding_top=*/    0,
+  /*padding_right=*/  0,
+  /*padding_bottom=*/ 0,
+  /*padding_left=*/   0,
+  /*pooling_height=*/ 2,
+  /*pooling_width=*/  2,
+  pool_values_id,   // from xnn_define_argmax_pooling_2d
+  pool_indices_id,  // from xnn_define_argmax_pooling_2d
+  output_id,
+  /*flags=*/          0);
+```
+
+---
+
+## Return Values
+
+All pooling functions return an `enum xnn_status`:
+
+| Status | Meaning |
+|--------|---------|
+| `xnn_status_success` | Node was successfully added to the subgraph. |
+| `xnn_status_invalid_parameter` | A parameter is inconsistent or out of range. |
+| `xnn_status_uninitialized` | `xnn_initialize()` was not called before use. |
+| `xnn_status_out_of_memory` | Memory allocation failed. |
+| `xnn_status_unsupported_parameter` | The combination of data types or flags is not supported. |

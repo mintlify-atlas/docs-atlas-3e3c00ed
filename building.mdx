@@ -1,0 +1,385 @@
+---
+title: "Building"
+description: "Build XNNPACK with CMake, Bazel, or GN for your target platform."
+---
+
+XNNPACK supports three build systems: **CMake**, **Bazel**, and **GN** (Chromium's build system). CMake is the recommended choice for most use cases and is the only system that supports all platforms. Bazel is useful for integration into existing Bazel workspaces. GN support is experimental as of January 2026.
+
+## Minimum requirements
+
+| Requirement | Version |
+|---|---|
+| C standard | C11 |
+| C++ standard | C++17 |
+| Python | 3.x |
+| CMake | 3.15+ |
+
+<Tabs>
+  <Tab title="CMake">
+
+## CMake
+
+CMake is the primary build system for XNNPACK and supports all target platforms. The `scripts/build-local.sh` wrapper handles host builds automatically.
+
+### Local (host) build
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/google/XNNPACK.git
+    cd XNNPACK
+    ```
+  </Step>
+
+  <Step title="Run the build script">
+    ```bash
+    scripts/build-local.sh
+    ```
+
+    This script configures a Release build, enables assembly micro-kernels, and compiles tests and benchmarks. Build artifacts are placed in `build/local/`. If Ninja is installed it is preferred over Make.
+  </Step>
+
+  <Step title="Run tests with CTest">
+    ```bash
+    cd build/local
+    ctest --output-on-failure --parallel $(nproc)
+    ```
+
+    `nproc` returns the number of CPU cores on Linux. On macOS use `sysctl -n hw.ncpu` instead.
+  </Step>
+</Steps>
+
+### Specifying a compiler
+
+Pass standard CMake variables as extra arguments to `build-local.sh`:
+
+```bash
+scripts/build-local.sh \
+  -DCMAKE_CXX_COMPILER=clang++-19 \
+  -DCMAKE_C_COMPILER=clang-19
+```
+
+### Android build
+
+<Steps>
+  <Step title="Download the Android NDK">
+    Download the NDK from [developer.android.com/ndk/downloads](https://developer.android.com/ndk/downloads). NDK r27c is tested and known to work.
+  </Step>
+
+  <Step title="Set the ANDROID_NDK environment variable">
+    ```bash
+    export ANDROID_NDK=$HOME/bin/android-ndk-r27c
+    ```
+  </Step>
+
+  <Step title="Run the platform build script">
+    <CodeGroup>
+      ```bash ARM64
+      ./scripts/build-android-arm64.sh
+      ```
+      ```bash ARMv7
+      ./scripts/build-android-armv7.sh
+      ```
+      ```bash x86
+      ./scripts/build-android-x86.sh
+      ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Push benchmarks to a connected device (optional)">
+    ```bash
+    adb push ./build/android/armeabi-v7a/bench /data/local/tmp
+    ```
+  </Step>
+</Steps>
+
+### iOS build
+
+iOS cross-compilation is done from macOS with Clang. Use CMake's `CMAKE_OSX_ARCHITECTURES` and `CMAKE_SYSTEM_NAME` to target iOS.
+
+```bash
+cmake -S . -B build/ios \
+  -DCMAKE_SYSTEM_NAME=iOS \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build/ios
+```
+
+### Windows build
+
+Use the platform-specific cmd scripts from the `scripts/` directory:
+
+<CodeGroup>
+  ```cmd x64
+  scripts\build-windows-x64.cmd
+  ```
+  ```cmd x86
+  scripts\build-windows-x86.cmd
+  ```
+  ```cmd ARM64
+  scripts\build-windows-arm64.cmd
+  ```
+</CodeGroup>
+
+Both Clang and MSVC are supported on Windows. Assembly micro-kernels are disabled automatically when building with MSVC (`XNNPACK_ENABLE_ASSEMBLY=OFF`).
+
+### Other cross-compilation targets
+
+| Platform | Script |
+|---|---|
+| Linux AArch64 (from x64) | `scripts/build-linux-aarch64.sh` |
+| Linux ARMhf | `scripts/build-linux-armhf.sh` |
+| Linux RISC-V 64 | `scripts/build-linux-riscv64.sh` |
+| WebAssembly | `scripts/build-wasm.sh` |
+| Hexagon (v68) | `scripts/build-qurt-v68.sh` |
+| Hexagon (v73) | `scripts/build-qurt-v73.sh` |
+
+### Key CMake options
+
+These options can be passed to any CMake configuration or appended to `build-local.sh`:
+
+| Option | Default | Description |
+|---|---|---|
+| `XNNPACK_ENABLE_ASSEMBLY` | `ON` (OFF on MSVC) | Build with hand-written assembly micro-kernels. Disable to fall back to C/intrinsic implementations. |
+| `XNNPACK_ENABLE_MEMOPT` | `ON` | Enable optimized memory allocation for intermediate tensors. |
+| `XNNPACK_ENABLE_SPARSE` | `ON` | Enable graph rewriting for sparse inference (sparsity-aware operator fusion). |
+| `XNNPACK_BUILD_LIBRARY` | `ON` | Build the XNNPACK library itself. |
+| `XNNPACK_BUILD_TESTS` | `ON` | Build the unit test suite. |
+| `XNNPACK_BUILD_BENCHMARKS` | `ON` | Build the benchmark suite. |
+| `XNNPACK_BUILD_ALL_MICROKERNELS` | `ON` | Build all micro-kernel variants (forced ON when tests or benchmarks are enabled). |
+| `XNNPACK_LIBRARY_TYPE` | `default` | Library type: `static`, `shared`, or `default`. |
+| `XNNPACK_USE_SYSTEM_LIBS` | `OFF` | Use system-provided dependency libraries instead of bundled ones. |
+
+Example — build a shared library without tests or benchmarks:
+
+```bash
+cmake -S . -B build/minimal \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DXNNPACK_LIBRARY_TYPE=shared \
+  -DXNNPACK_BUILD_TESTS=OFF \
+  -DXNNPACK_BUILD_BENCHMARKS=OFF
+cmake --build build/minimal
+```
+
+### CMake platform/compiler support matrix
+
+| Platform | Target | Host CPU | Target CPU | Compiler | Works | Supported |
+|---|---|---|---|---|:---:|:---:|
+| Linux | Linux | x64 | x64 | Clang 19.1.7 | ✅ | ✅ |
+| Linux | Linux | x64 | x64 | Clang 18 | ✅ | ✅ |
+| Linux | Linux | x64 | x64 | GCC 14.2.0 | ✅ | ✅ |
+| Linux | Linux | AArch64 | Armv7-A | GCC | ✅ | ✅ |
+| macOS | macOS | AArch64 | AArch64 | Clang | ✅ | ✅ |
+| Linux | Android | x64 | Armv7-A | NDK r27c | ✅ | ✅ |
+| Linux | Android | x64 | AArch64 | NDK r27c | ✅ | ✅ |
+| Linux | Android | x64 | x64 | NDK r27c | ✅ | ✅ |
+| macOS | iOS | AArch64 | AArch64 | Clang | ✅ | ✅ |
+| macOS | iOS | AArch64 | x86 | Clang | ✅ | ✅ |
+| Windows | Windows | x64 | x64 | Clang/MSVC | ✅ | ✅ |
+| Windows | Windows | x64 | x86 | Clang/MSVC | ✅ | ✅ |
+| Windows | Windows | x64 | AArch64 | Clang/MSVC | ✅ | ✅ |
+
+<Note>
+Supported combinations are regularly tested via GitHub Actions and should always work. If a supported combination fails, [open a GitHub issue](https://github.com/google/XNNPACK/issues).
+</Note>
+
+  </Tab>
+  <Tab title="Bazel">
+
+## Bazel
+
+Bazel is supported for host builds. Cross-compilation to another operating system or CPU architecture does not work on recent versions of Bazel.
+
+<Warning>
+Using Bazel's `:all` meta-target is not supported. Use explicit targets like `//bench/...` and `//test/...` instead.
+</Warning>
+
+### Optimization levels
+
+The `-c` flag controls the Bazel optimization level:
+
+| Flag | Compiler flags | Use case |
+|---|---|---|
+| `-c opt` | `-O2`, no assertions, no debug info | Production builds |
+| `-c fastbuild` | No optimization, minimal debug info, assertions | Fast development and testing |
+| `-c dbg` | No optimization, full debug info | Debugging |
+
+### Build benchmarks and tests
+
+```bash
+# Default compiler
+bazel build -c fastbuild //bench/... //test/...
+bazel test -c fastbuild --local_test_jobs=HOST_CPUS //bench/... //test/...
+```
+
+### Use an alternate compiler
+
+Bazel respects the `CC` and `CXX` environment variables:
+
+```bash
+CC=clang-19 CXX=clang++-19 bazel build -c fastbuild //bench/... //test/...
+CC=clang-19 CXX=clang++-19 bazel test -c fastbuild --local_test_jobs=HOST_CPUS //bench/... //test/...
+```
+
+### Feature flags
+
+Optional features are controlled with `--define` flags:
+
+```bash
+bazel build -c opt --define=xnn_enable_avxvnni=false //bench/...
+```
+
+### Bazel platform/compiler support matrix
+
+| Platform | CPU | Compiler | `-c` config | Works | Supported |
+|---|---|---|---|:---:|:---:|
+| Linux | x64 | GCC 14.2.0 | `fastbuild` | ✅ | ❌ |
+| Linux | x64 | GCC 14.2.0 | `opt` | ❌ | ❌ |
+| Linux | x64 | Clang 19.1.7 | `fastbuild` | ✅ | ❌ |
+| Linux | x64 | Clang 19.1.7 | `opt` | ✅ | ❌ |
+| Linux | x64 | Clang 18 | `fastbuild` | ✅ | ✅ |
+| Linux | x64 | GCC 9 | `fastbuild` | — | ✅ |
+| Linux | AArch64 | Clang 18 | `fastbuild` | — | ✅ |
+| Linux | AArch64 | Clang 20 | `fastbuild` | — | ✅ |
+| Linux | AArch64 | GCC 13 | `fastbuild` | — | ✅ |
+
+<Note>
+GCC 9 with `fastbuild` requires [appropriate defines](https://github.com/google/XNNPACK/blob/master/.github/workflows/build.yml) to work correctly.
+</Note>
+
+  </Tab>
+  <Tab title="GN">
+
+## GN
+
+GN is the build system used by the Chromium project. XNNPACK GN support is **experimental and incomplete** as of January 2026 and is not automatically tested.
+
+<Warning>
+If the GN instructions do not work for you, [open an issue](https://github.com/google/XNNPACK/issues).
+</Warning>
+
+### Get the code
+
+GN builds require Chromium's `depot_tools` to manage dependencies.
+
+<Steps>
+  <Step title="Install depot_tools">
+    Follow the [upstream depot_tools setup instructions](https://commondatastorage.googleapis.com/chrome-infra-docs/flat/depot_tools/docs/html/depot_tools_tutorial.html#_setting_up).
+  </Step>
+
+  <Step title="Create a directory for XNNPACK">
+    ```bash
+    mkdir XNNPACK && cd XNNPACK
+    ```
+  </Step>
+
+  <Step title="Create a .gclient file">
+    ```python
+    solutions = [
+      { "name"        : 'xnnpack',
+        "url"         : 'https://github.com/google/XNNPACK',
+        "deps_file"   : 'DEPS',
+        "managed"     : False,
+        "custom_deps" : {},
+        # Optional: add "checkout_kleidiai": True
+        "custom_vars": {},
+      },
+    ]
+    # Optionally, set target_os to include Android dependencies
+    target_os = ["android"]
+    ```
+  </Step>
+
+  <Step title="Fetch source and dependencies">
+    ```bash
+    gclient sync
+    ```
+  </Step>
+</Steps>
+
+### Configure a build
+
+Run `gn args out/Default` to open a text editor for configuring your build. Example configuration:
+
+```python
+# Target architecture: "x64", "x86" (32-bit), or "arm64"
+target_cpu = "x64"
+
+# Release-optimized build
+is_debug = false
+
+# Keep assertions and logging alongside release optimization
+dcheck_always_on = true
+
+# Retain symbol information for profiling
+symbol_level = 1
+
+# Enable AVX-512 support
+xnnpack_enable_avx512 = true
+```
+
+After saving and exiting, GN generates the build files. To regenerate them after manually editing `out/Default/args.gn`:
+
+```bash
+gn gen out/Default
+```
+
+To list all available arguments:
+
+```bash
+gn args --list out/Default
+```
+
+<Info>
+Many build arguments are shared with the Chromium project. Not all of them affect XNNPACK.
+</Info>
+
+### Build
+
+```bash
+autoninja -C out/Default
+```
+
+### Run tests
+
+All GN-enabled tests are named `xnnpack_*_test` (for example, `out/Default/xnnpack_rminmax_test`) and are runnable directly from the command line.
+
+A helper script runs all known unit tests:
+
+```bash
+vpython3 scripts/run-gn-tests.py out/Default
+```
+
+To run tests on an Android device:
+
+```bash
+adb push out/arm64/xnnpack_operators_test /data/local/tmp
+adb shell /data/local/tmp/xnnpack_operators_test
+```
+
+### GN supported configurations
+
+| `target_os` | `target_cpu` | Works | Supported | Notes |
+|---|---|:---:|:---:|---|
+| `linux` | `x64` | ✅ | ❌ | |
+| `linux` | `x86` | ✅ | ❌ | |
+| `linux` | `arm64` | ✅ | ❌ | |
+| `macos` | `arm64` | ✅ | ❌ | |
+| `android` | `arm64` | ✅ | ❌ | `target_os=["android"]` must be set in `.gclient`; `is_component_build=true` is not supported. |
+
+  </Tab>
+</Tabs>
+
+## WebAssembly build
+
+Building for WebAssembly requires the [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html).
+
+```bash
+# Activate Emscripten before building
+source /path/to/emsdk/emsdk_env.sh
+
+# Build for WebAssembly
+scripts/build-wasm.sh
+```
+
+CMake detects the Emscripten toolchain automatically and sets the target processor to `wasm`.

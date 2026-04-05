@@ -1,0 +1,214 @@
+---
+title: "Initialization"
+description: "Initialize and deinitialize the XNNPACK library, configure custom memory allocators, and understand status codes returned by all XNNPACK functions."
+---
+
+XNNPACK must be successfully initialized before any other function is called. During initialization, XNNPACK probes the host processor and populates internal microkernel dispatch tables. This process can be time-consuming, so it should be done once at application startup.
+
+## Functions
+
+### `xnn_initialize`
+
+```c
+enum xnn_status xnn_initialize(const struct xnn_allocator* allocator);
+```
+
+Initialize the XNNPACK library. Must be called before any other XNNPACK API. On success, XNNPACK is ready to create subgraphs and runtimes.
+
+<ParamField path="allocator" type="const struct xnn_allocator*">
+  Pointer to a custom allocator structure. Pass `NULL` to use the system default allocator (`malloc`/`free`). If non-`NULL`, all five function pointers in the structure must be set.
+</ParamField>
+
+**Return values**
+
+| Status | Meaning |
+|--------|---------|
+| `xnn_status_success` | XNNPACK initialized successfully and is ready to use. |
+| `xnn_status_out_of_memory` | Initialization failed because a memory allocation failed. |
+| `xnn_status_unsupported_hardware` | The host processor does not meet minimum hardware requirements (e.g., x86 without SSE2, or 32-bit ARM without NEON). |
+
+<Note>
+  Calling `xnn_initialize` more than once is safe. Subsequent calls are no-ops if the library is already initialized.
+</Note>
+
+---
+
+### `xnn_deinitialize`
+
+```c
+enum xnn_status xnn_deinitialize(void);
+```
+
+Deinitialize the XNNPACK library. Currently a no-op — it always returns `xnn_status_success` without doing anything. Provided for API symmetry and future use.
+
+**Return values**
+
+| Status | Meaning |
+|--------|---------|
+| `xnn_status_success` | Always returned. |
+
+---
+
+## `enum xnn_status`
+
+Every XNNPACK function returns an `enum xnn_status` value. Always check the return value before proceeding.
+
+```c
+enum xnn_status {
+  xnn_status_success               = 0,
+  xnn_status_uninitialized         = 1,
+  xnn_status_invalid_parameter     = 2,
+  xnn_status_invalid_state         = 3,
+  xnn_status_unsupported_parameter = 4,
+  xnn_status_unsupported_hardware  = 5,
+  xnn_status_out_of_memory         = 6,
+  xnn_status_reallocation_required = 7,
+  xnn_status_deprecated            = 8,
+};
+```
+
+| Value | Name | Description |
+|-------|------|-------------|
+| `0` | `xnn_status_success` | The call succeeded. All output arguments contain valid data. |
+| `1` | `xnn_status_uninitialized` | `xnn_initialize` has not been called or failed. |
+| `2` | `xnn_status_invalid_parameter` | A parameter value is out of range, NULL when non-NULL is required, or otherwise invalid. |
+| `3` | `xnn_status_invalid_state` | The object is in the wrong state for this operation (e.g., calling `xnn_invoke_runtime` before `xnn_setup_runtime`). |
+| `4` | `xnn_status_unsupported_parameter` | A parameter value is valid but not supported by the current build or hardware. |
+| `5` | `xnn_status_unsupported_hardware` | The host processor lacks required hardware features. |
+| `6` | `xnn_status_out_of_memory` | A memory allocation failed. |
+| `7` | `xnn_status_reallocation_required` | An internal buffer needs to be reallocated. Retry the operation. |
+| `8` | `xnn_status_deprecated` | The called function is deprecated. |
+
+---
+
+## `struct xnn_allocator`
+
+Provides custom memory management functions to XNNPACK. Pass a pointer to a populated `xnn_allocator` to `xnn_initialize`, or pass `NULL` to use system defaults.
+
+```c
+struct xnn_allocator {
+  void* context;
+  void* (*allocate)(void* context, size_t size);
+  void* (*reallocate)(void* context, void* pointer, size_t size);
+  void  (*deallocate)(void* context, void* pointer);
+  void* (*aligned_allocate)(void* context, size_t alignment, size_t size);
+  void  (*aligned_deallocate)(void* context, void* pointer);
+};
+```
+
+<ParamField path="context" type="void*">
+  An opaque user-defined pointer passed as the first argument to every allocator function. Use this to carry state (e.g., a memory pool handle) into your callbacks.
+</ParamField>
+
+<ParamField path="allocate" type="void* (*)(void* context, size_t size)">
+  General-purpose allocation. Must return a pointer to at least `size` bytes, or `NULL` on failure.
+</ParamField>
+
+<ParamField path="reallocate" type="void* (*)(void* context, void* pointer, size_t size)">
+  Resize a previously allocated block. The content of the old block is copied into the new block. If `pointer` is `NULL`, behaves like `allocate`. On failure, must return `NULL` **without freeing** the original block.
+</ParamField>
+
+<ParamField path="deallocate" type="void (*)(void* context, void* pointer)">
+  Free a block allocated by `allocate` or `reallocate`. If `pointer` is `NULL`, this must be a no-op.
+</ParamField>
+
+<ParamField path="aligned_allocate" type="void* (*)(void* context, size_t alignment, size_t size)">
+  Allocate a block with a specific byte alignment. `alignment` is always a power of two. Must return a pointer to at least `size` bytes aligned to `alignment`, or `NULL` on failure.
+</ParamField>
+
+<ParamField path="aligned_deallocate" type="void (*)(void* context, void* pointer)">
+  Free a block allocated by `aligned_allocate`. If `pointer` is `NULL`, this must be a no-op.
+</ParamField>
+
+<Warning>
+  All five function pointers must be set when providing a custom allocator. XNNPACK does not check for `NULL` function pointers.
+</Warning>
+
+---
+
+## Thread safety
+
+- `xnn_initialize` is **not** thread-safe. Call it once from a single thread before spawning any threads that use XNNPACK.
+- After successful initialization, all other XNNPACK API functions are thread-safe with respect to independent Runtime objects.
+- A single Runtime object must not be used concurrently from multiple threads.
+
+---
+
+## Examples
+
+### Initialize with default allocator
+
+```c
+#include <xnnpack.h>
+#include <stdio.h>
+
+int main(void) {
+  enum xnn_status status = xnn_initialize(NULL);
+  if (status != xnn_status_success) {
+    fprintf(stderr, "XNNPACK initialization failed: %d\n", status);
+    return 1;
+  }
+
+  // ... create subgraphs and runtimes ...
+
+  xnn_deinitialize();
+  return 0;
+}
+```
+
+### Initialize with a custom allocator
+
+```c
+#include <xnnpack.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+static void* my_allocate(void* context, size_t size) {
+  (void)context;
+  return malloc(size);
+}
+
+static void* my_reallocate(void* context, void* pointer, size_t size) {
+  (void)context;
+  return realloc(pointer, size);
+}
+
+static void my_deallocate(void* context, void* pointer) {
+  (void)context;
+  free(pointer);
+}
+
+static void* my_aligned_allocate(void* context, size_t alignment, size_t size) {
+  (void)context;
+  void* ptr = NULL;
+  if (posix_memalign(&ptr, alignment, size) != 0) return NULL;
+  return ptr;
+}
+
+static void my_aligned_deallocate(void* context, void* pointer) {
+  (void)context;
+  free(pointer);
+}
+
+int main(void) {
+  struct xnn_allocator allocator = {
+    .context           = NULL,
+    .allocate          = my_allocate,
+    .reallocate        = my_reallocate,
+    .deallocate        = my_deallocate,
+    .aligned_allocate  = my_aligned_allocate,
+    .aligned_deallocate = my_aligned_deallocate,
+  };
+
+  enum xnn_status status = xnn_initialize(&allocator);
+  if (status != xnn_status_success) {
+    fprintf(stderr, "XNNPACK initialization failed: %d\n", status);
+    return 1;
+  }
+
+  // ... use XNNPACK ...
+
+  xnn_deinitialize();
+  return 0;
+}
+```

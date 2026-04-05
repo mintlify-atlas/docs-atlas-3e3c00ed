@@ -1,80 +1,329 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Build XNNPACK and run your first neural network inference in C using the subgraph API."
 ---
 
-## Get started in three steps
+This guide walks you through building XNNPACK from source and writing a minimal C program that performs neural network inference using the subgraph API.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+Before you begin, make sure your system meets these requirements:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+- C11-compatible compiler (GCC 9+, Clang 18+, or MSVC)
+- C++17-compatible compiler
+- Python 3.x
+- CMake 3.15 or newer
+- Git
 
-### Step 2: Deploy your changes
+## Build XNNPACK
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/google/XNNPACK.git
+    cd XNNPACK
+    ```
+  </Step>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+  <Step title="Run the local build script">
+    The `scripts/build-local.sh` script automatically configures CMake for your host CPU and operating system, then compiles the library, benchmarks, and test suite.
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```bash
+    scripts/build-local.sh
+    ```
 
-### Step 3: Go live
+    Build artifacts are written to `build/local/`. The script uses Ninja automatically if it is installed, otherwise it falls back to Make. It builds with twice the number of available CPU cores in parallel.
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    To use a specific compiler, pass CMake variables as additional arguments:
+
+    ```bash
+    scripts/build-local.sh -DCMAKE_CXX_COMPILER=clang++-19 -DCMAKE_C_COMPILER=clang-19
+    ```
+  </Step>
+
+  <Step title="Run the test suite (optional)">
+    ```bash
+    cd build/local
+    ctest --output-on-failure --parallel $(nproc)
+    ```
+  </Step>
+</Steps>
+
+## Write your first inference program
+
+The example below applies softmax to a 1D input tensor of four logits and reads back the probability output. It demonstrates the complete XNNPACK subgraph API lifecycle.
+
+### Complete example
+
+```c
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <xnnpack.h>
+
+int main(void) {
+  // Step 1: Initialize XNNPACK.
+  // Pass NULL to use the default system allocator (malloc/free).
+  enum xnn_status status = xnn_initialize(NULL);
+  if (status != xnn_status_success) {
+    fprintf(stderr, "Failed to initialize XNNPACK: %d\n", status);
+    return EXIT_FAILURE;
+  }
+
+  // Step 2: Create a subgraph.
+  // Reserve 2 external value IDs: one for input, one for output.
+  xnn_subgraph_t subgraph = NULL;
+  status = xnn_create_subgraph(
+    /*external_value_ids=*/2,
+    /*flags=*/0,
+    &subgraph);
+  if (status != xnn_status_success) {
+    fprintf(stderr, "Failed to create subgraph: %d\n", status);
+    return EXIT_FAILURE;
+  }
+
+  // Step 3: Define tensor values.
+  // The input is a 1D FP32 tensor with 4 elements (logits).
+  uint32_t input_id = XNN_INVALID_VALUE_ID;
+  const size_t dims[1] = {4};
+  status = xnn_define_tensor_value(
+    subgraph,
+    /*datatype=*/xnn_datatype_fp32,
+    /*num_dims=*/1,
+    /*dims=*/dims,
+    /*data=*/NULL,            // not statically initialized
+    /*external_id=*/0,        // reserve external ID 0 for input
+    /*flags=*/XNN_VALUE_FLAG_EXTERNAL_INPUT,
+    &input_id);
+  if (status != xnn_status_success) {
+    fprintf(stderr, "Failed to define input tensor: %d\n", status);
+    xnn_delete_subgraph(subgraph);
+    return EXIT_FAILURE;
+  }
+
+  // The output is a 1D FP32 tensor with the same shape.
+  uint32_t output_id = XNN_INVALID_VALUE_ID;
+  status = xnn_define_tensor_value(
+    subgraph,
+    /*datatype=*/xnn_datatype_fp32,
+    /*num_dims=*/1,
+    /*dims=*/dims,
+    /*data=*/NULL,
+    /*external_id=*/1,        // reserve external ID 1 for output
+    /*flags=*/XNN_VALUE_FLAG_EXTERNAL_OUTPUT,
+    &output_id);
+  if (status != xnn_status_success) {
+    fprintf(stderr, "Failed to define output tensor: %d\n", status);
+    xnn_delete_subgraph(subgraph);
+    return EXIT_FAILURE;
+  }
+
+  // Step 4: Define the softmax operator node.
+  status = xnn_define_softmax(
+    subgraph,
+    /*input_id=*/input_id,
+    /*output_id=*/output_id,
+    /*flags=*/0);
+  if (status != xnn_status_success) {
+    fprintf(stderr, "Failed to define softmax: %d\n", status);
+    xnn_delete_subgraph(subgraph);
+    return EXIT_FAILURE;
+  }
+
+  // Step 5: Create a runtime from the subgraph.
+  // Pass NULL for threadpool to run single-threaded on the caller thread.
+  xnn_runtime_t runtime = NULL;
+  status = xnn_create_runtime_v2(
+    subgraph,
+    /*threadpool=*/NULL,
+    /*flags=*/0,
+    &runtime);
+  if (status != xnn_status_success) {
+    fprintf(stderr, "Failed to create runtime: %d\n", status);
+    xnn_delete_subgraph(subgraph);
+    return EXIT_FAILURE;
+  }
+
+  // Step 6: Bind external input/output buffers and invoke.
+  // Allocate XNN_EXTRA_BYTES of padding after the tensor data as required.
+  float input_data[4 + XNN_EXTRA_BYTES / sizeof(float)];
+  float output_data[4 + XNN_EXTRA_BYTES / sizeof(float)];
+
+  // Set some input logits.
+  input_data[0] = 1.0f;
+  input_data[1] = 2.0f;
+  input_data[2] = 3.0f;
+  input_data[3] = 4.0f;
+
+  struct xnn_external_value external_values[2] = {
+    {.id = 0, .data = input_data},
+    {.id = 1, .data = output_data},
+  };
+
+  // Reshape propagates input shapes through the graph.
+  status = xnn_reshape_runtime(runtime);
+  if (status != xnn_status_success) {
+    fprintf(stderr, "Failed to reshape runtime: %d\n", status);
+    xnn_delete_runtime(runtime);
+    xnn_delete_subgraph(subgraph);
+    return EXIT_FAILURE;
+  }
+
+  // Setup binds the data pointers to the runtime.
+  status = xnn_setup_runtime_v2(runtime, 2, external_values);
+  if (status != xnn_status_success) {
+    fprintf(stderr, "Failed to setup runtime: %d\n", status);
+    xnn_delete_runtime(runtime);
+    xnn_delete_subgraph(subgraph);
+    return EXIT_FAILURE;
+  }
+
+  // Invoke executes the forward pass.
+  status = xnn_invoke_runtime(runtime);
+  if (status != xnn_status_success) {
+    fprintf(stderr, "Failed to invoke runtime: %d\n", status);
+    xnn_delete_runtime(runtime);
+    xnn_delete_subgraph(subgraph);
+    return EXIT_FAILURE;
+  }
+
+  // Step 7: Read results.
+  printf("Softmax output: [%.4f, %.4f, %.4f, %.4f]\n",
+    output_data[0], output_data[1], output_data[2], output_data[3]);
+  // Expected: [0.0321, 0.0871, 0.2369, 0.6439]
+
+  // Step 8: Clean up.
+  xnn_delete_runtime(runtime);
+  xnn_delete_subgraph(subgraph);
+
+  return EXIT_SUCCESS;
+}
+```
+
+### Walkthrough
+
+<Steps>
+  <Step title="Initialize XNNPACK">
+    ```c
+    enum xnn_status xnn_initialize(const struct xnn_allocator* allocator);
+    ```
+
+    Call `xnn_initialize` once before any other XNNPACK function. XNNPACK uses this call to detect CPU features and set up internal microkernel dispatch tables. Pass `NULL` to use the system allocator (`malloc`/`free`). The call is time-consuming and should not be repeated in a hot path.
+
+    Possible return values:
+    - `xnn_status_success` — ready to use
+    - `xnn_status_out_of_memory` — initialization failed
+    - `xnn_status_unsupported_hardware` — the host CPU does not meet minimum requirements (for example, an x86 processor without SSE2, or a 32-bit ARM without NEON)
+  </Step>
+
+  <Step title="Create a subgraph">
+    ```c
+    enum xnn_status xnn_create_subgraph(
+      uint32_t external_value_ids,
+      uint32_t flags,
+      xnn_subgraph_t* subgraph_out);
+    ```
+
+    A **subgraph** is an abstract representation of your neural network. It holds Value (tensor) and Node (operator) definitions. `external_value_ids` reserves a contiguous block of IDs for external inputs and outputs — these are tensors whose data pointers you supply at runtime.
+  </Step>
+
+  <Step title="Define tensor values">
+    ```c
+    enum xnn_status xnn_define_tensor_value(
+      xnn_subgraph_t subgraph,
+      enum xnn_datatype datatype,
+      size_t num_dims,
+      const size_t* dims,
+      const void* data,
+      uint32_t external_id,
+      uint32_t flags,
+      uint32_t* id_out);
+    ```
+
+    Each tensor is added to the subgraph with a datatype, shape, and an optional pointer to static data (for weight tensors). Use `XNN_VALUE_FLAG_EXTERNAL_INPUT` and `XNN_VALUE_FLAG_EXTERNAL_OUTPUT` to mark tensors whose buffers you will provide at inference time.
+
+    Supported datatypes include `xnn_datatype_fp32`, `xnn_datatype_fp16`, `xnn_datatype_bf16`, and quantized formats such as `xnn_datatype_qint8`, `xnn_datatype_quint8`, and `xnn_datatype_qcint4`.
+  </Step>
+
+  <Step title="Define operators">
+    ```c
+    enum xnn_status xnn_define_softmax(
+      xnn_subgraph_t subgraph,
+      uint32_t input_id,
+      uint32_t output_id,
+      uint32_t flags);
+    ```
+
+    Each call to an `xnn_define_*` function adds an operator node to the subgraph, referencing tensors by their Value IDs. XNNPACK supports more than 35 operators including convolution, pooling, elementwise operations, and matrix multiplication.
+  </Step>
+
+  <Step title="Create a runtime">
+    ```c
+    enum xnn_status xnn_create_runtime_v2(
+      xnn_subgraph_t subgraph,
+      pthreadpool_t threadpool,
+      uint32_t flags,
+      xnn_runtime_t* runtime_out);
+    ```
+
+    A **runtime** compiles the subgraph into an execution plan and allocates memory for internal tensors. The subgraph and runtime are independent after creation — you can safely delete the subgraph once the runtime is created.
+
+    Pass a `pthreadpool_t` thread pool handle for multi-threaded inference, or `NULL` for single-threaded execution on the caller thread.
+  </Step>
+
+  <Step title="Reshape, setup, and invoke">
+    ```c
+    // Propagate shapes through the graph
+    xnn_reshape_runtime(runtime);
+
+    // Bind external data buffers
+    xnn_setup_runtime_v2(runtime, num_external_values, external_values);
+
+    // Run the forward pass
+    xnn_invoke_runtime(runtime);
+    ```
+
+    Call these three functions in order for each inference. You can call `xnn_invoke_runtime` repeatedly with new data in the same buffers without repeating reshape and setup, as long as the tensor shapes do not change.
+
+    <Note>
+    Allocate at least `XNN_EXTRA_BYTES` of padding beyond the end of every tensor buffer. XNNPACK may read (but never write) slightly beyond declared tensor bounds for alignment reasons.
+    </Note>
+  </Step>
+
+  <Step title="Clean up">
+    ```c
+    enum xnn_status xnn_delete_runtime(xnn_runtime_t runtime);
+    enum xnn_status xnn_delete_subgraph(xnn_subgraph_t subgraph);
+    ```
+
+    Delete the runtime first, then the subgraph. Both calls release all memory associated with their respective objects.
+  </Step>
+</Steps>
+
+## Compile the example
+
+Once you have built XNNPACK, compile the example against the static library:
+
+```bash
+gcc -std=c11 -o softmax_example softmax_example.c \
+  -Ibuild/local/include \
+  -Ibuild/local/_deps/pthreadpool-src/include \
+  build/local/libXNNPACK.a \
+  build/local/_deps/pthreadpool-build/libpthreadpool.a \
+  -lm -lpthread
+```
+
+Run it:
+
+```bash
+./softmax_example
+# Softmax output: [0.0321, 0.0871, 0.2369, 0.6439]
+```
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+- Read the [building guide](/building) for cross-compilation, Android, and alternative build systems.
+- Explore the `bench/` and `test/` directories in the repository for more complete usage examples.
+- See the operator API reference for the full list of `xnn_define_*` functions.

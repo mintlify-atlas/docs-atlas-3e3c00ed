@@ -1,0 +1,179 @@
+---
+title: "WebAssembly Support"
+description: "Building XNNPACK for WebAssembly with Emscripten, supported targets, SIMD acceleration, and performance considerations."
+---
+
+XNNPACK supports three WebAssembly targets, enabling high-performance neural network inference directly in browsers and other WebAssembly runtimes.
+
+## Supported WebAssembly Targets
+
+| Target | Status | Notes |
+|---|---|---|
+| WebAssembly MVP | Stable | Baseline support, scalar operations only |
+| WebAssembly SIMD128 | Stable | 128-bit SIMD acceleration, widely supported in modern browsers |
+| WebAssembly Relaxed SIMD | Experimental | Extended SIMD with relaxed semantics, not yet universally available |
+
+<Warning>
+  **WebAssembly Relaxed SIMD is experimental.** Browser support is still rolling out. Do not rely on Relaxed SIMD in production deployments without verifying your target runtime supports it. See the [WebAssembly Relaxed SIMD proposal](https://github.com/WebAssembly/relaxed-simd) for the current status.
+</Warning>
+
+---
+
+## How the CMake Build Detects Emscripten
+
+When CMake is invoked through Emscripten's toolchain, the `EMSCRIPTEN` variable is set automatically. XNNPACK's `CMakeLists.txt` uses this to select the WebAssembly target processor:
+
+```cmake
+# CMakeLists.txt (lines 72–74)
+IF(EMSCRIPTEN)
+  MESSAGE(STATUS "Building XNNPACK for WebAssembly with Emscripten")
+  SET(XNNPACK_TARGET_PROCESSOR "wasm")
+ENDIF()
+```
+
+Setting `XNNPACK_TARGET_PROCESSOR` to `"wasm"` switches on all WebAssembly-specific microkernel paths and disables architecture-specific code for ARM, x86, and other native targets.
+
+---
+
+## Building with Emscripten (CMake)
+
+<Steps>
+  <Step title="Install Emscripten">
+    Install the [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html) and activate an SDK version:
+
+    ```bash
+    git clone https://github.com/emscripten-core/emsdk.git
+    cd emsdk
+    ./emsdk install latest
+    ./emsdk activate latest
+    source ./emsdk_env.sh
+    ```
+  </Step>
+
+  <Step title="Configure with emcmake">
+    Use `emcmake` to wrap the CMake configure step. Emscripten's toolchain sets the `EMSCRIPTEN` flag, which XNNPACK detects to set `XNNPACK_TARGET_PROCESSOR=wasm`.
+
+    ```bash
+    # In the XNNPACK root directory
+    mkdir -p build/wasm && cd build/wasm
+
+    emcmake cmake ../.. \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DXNNPACK_BUILD_TESTS=OFF \
+      -DXNNPACK_BUILD_BENCHMARKS=OFF
+    ```
+
+    To enable **WebAssembly SIMD128** support, pass the appropriate Emscripten flag:
+
+    ```bash
+    emcmake cmake ../.. \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_FLAGS="-msimd128" \
+      -DCMAKE_CXX_FLAGS="-msimd128" \
+      -DXNNPACK_BUILD_TESTS=OFF \
+      -DXNNPACK_BUILD_BENCHMARKS=OFF
+    ```
+  </Step>
+
+  <Step title="Build">
+    Run `emmake make` (or `emmake ninja` if you configured with Ninja) to compile:
+
+    ```bash
+    emmake make -j$(nproc)
+    ```
+
+    The build output will be `.wasm` and `.js` files in the `build/wasm` directory.
+  </Step>
+
+  <Step title="Use the library">
+    Link the resulting XNNPACK library into your WebAssembly project. The library exposes the same C API as the native builds, so existing integration code is reusable without modification.
+  </Step>
+</Steps>
+
+---
+
+## Building with Bazel (Emscripten)
+
+XNNPACK provides `emscripten.bzl` with Bazel helper macros for Emscripten builds. These define linker options appropriate for different binary types.
+
+```python
+# emscripten.bzl
+
+def xnnpack_emscripten_minimal_linkopts():
+    """Minimal linkopts for production binaries."""
+    return [
+        "-s ASSERTIONS=0",
+        "-s ENVIRONMENT=node,shell,web",
+        "-s ERROR_ON_UNDEFINED_SYMBOLS=1",
+        "-s EXIT_RUNTIME=1",
+    ]
+
+def xnnpack_emscripten_test_linkopts():
+    """Linkopts for unit test binaries."""
+    return [
+        "-s ALLOW_MEMORY_GROWTH=1",
+        "-s ASSERTIONS=2",
+        "-s ENVIRONMENT=node,shell,web",
+        "-s ERROR_ON_UNDEFINED_SYMBOLS=1",
+        "-s EXIT_RUNTIME=1",
+        "-s STACK_SIZE=5MB",
+        "-s TEXTDECODER=1",
+        "--pre-js $(location //:preamble.js.lds)",
+    ]
+
+def xnnpack_emscripten_benchmark_linkopts():
+    """Linkopts for benchmark binaries."""
+    return [
+        "-s ASSERTIONS=1",
+        "-s ENVIRONMENT=node,shell,web",
+        "-s ERROR_ON_UNDEFINED_SYMBOLS=1",
+        "-s EXIT_RUNTIME=1",
+        "-s ALLOW_MEMORY_GROWTH=1",
+        "-s INITIAL_MEMORY=1gb",
+        "-s MAXIMUM_MEMORY=4gb",
+        "-s TEXTDECODER=1",
+        "--pre-js $(location //:preamble.js.lds)",
+    ]
+```
+
+Use these helpers in your `BUILD` file when defining Emscripten targets:
+
+```python
+load("//:emscripten.bzl", "xnnpack_emscripten_minimal_linkopts")
+
+cc_binary(
+    name = "my_wasm_binary",
+    srcs = ["main.c"],
+    deps = ["//:xnnpack"],
+    linkopts = xnnpack_emscripten_minimal_linkopts(),
+)
+```
+
+<Info>
+  The `xnnpack_emscripten_benchmark_linkopts()` helper sets `INITIAL_MEMORY=1gb` and `MAXIMUM_MEMORY=4gb` to accommodate the large working sets required by neural network benchmarks. For production use, adjust these values to your workload's actual memory requirements.
+</Info>
+
+---
+
+## Use in TensorFlow.js
+
+The TensorFlow.js WebAssembly backend, [introduced in March 2020](https://blog.tensorflow.org/2020/03/introducing-webassembly-backend-for-tensorflow-js.html), is built on XNNPACK compiled via Emscripten. It runs in browsers and Node.js without any native dependencies.
+
+The backend automatically detects SIMD support at runtime and selects the appropriate code path:
+
+- **SIMD128 available**: Uses vectorized XNNPACK microkernels for significantly faster inference.
+- **SIMD128 unavailable**: Falls back to scalar WebAssembly MVP kernels.
+
+---
+
+## Performance Considerations
+
+WebAssembly builds are inherently slower than native builds due to several factors:
+
+- **No OS-level threading by default**: SharedArrayBuffer and Atomics are required for multi-threading, and browser policies (cross-origin isolation headers) must be met.
+- **SIMD width**: WebAssembly SIMD128 provides 128-bit vectors, narrower than AVX2 (256-bit) or AVX-512 (512-bit) on x86, or NEON/SVE on ARM.
+- **JIT overhead**: The WebAssembly JIT compiler introduces startup latency compared to ahead-of-time compiled native code.
+
+<Tip>
+  Always enable **WebAssembly SIMD128** (`-msimd128`) when targeting modern browsers. It typically provides a 2–4x throughput improvement over scalar WebAssembly MVP for compute-intensive operations like convolution and matrix multiplication. Check [caniuse.com](https://caniuse.com/wasm-simd) for current browser support coverage.
+</Tip>

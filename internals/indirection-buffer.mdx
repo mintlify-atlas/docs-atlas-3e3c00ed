@@ -1,0 +1,207 @@
+---
+title: "Indirection Buffer"
+description: "How XNNPACK's indirection buffer enables the indirect convolution algorithm, how it is constructed and compressed, and how padding and memory footprint are handled."
+---
+
+The **indirection buffer** is an array of pointers to input data. Instead of gathering or copying input pixels into a contiguous buffer before computing convolutions, XNNPACK passes a pre-built array of pointers directly to the microkernel. This is the core of the [Indirect Convolution Algorithm](https://arxiv.org/abs/1907.02129) (Marat Dukhan, 2019).
+
+## What the indirection buffer is
+
+```
+indirection buffer = float*[output_width × kernel_height × kernel_width]
+```
+
+Each entry points to the beginning of an input tile for one (output pixel, kernel position) pair. The microkernel reads input data by following these pointers rather than computing source addresses from scratch.
+
+This separates two concerns:
+
+1. **Address computation** — done once at operator setup time when the indirection buffer is filled in.
+2. **Arithmetic** — the microkernel sees only a flat array of pointers and a contiguous weight buffer.
+
+## Why indirection buffers are used
+
+Direct convolution requires complex address arithmetic to handle strides, padding, and kernel offsets. The indirect approach pays this cost once, up front, and then lets the microkernel stay simple and tight.
+
+The main benefits are:
+
+- **No im2col copy** — input data is never duplicated into a temporary buffer.
+- **Simple microkernel inner loop** — just follow a pointer and add an offset.
+- **Reuse across operator calls** — the indirection buffer is built once per operator configuration (not per inference call), unless `XNN_FLAG_TRANSIENT_INDIRECTION_BUFFER` is set.
+
+## Buffer construction
+
+Consider a depthwise convolution with a 2×2 kernel on a 3×3 input, producing a 1×2 output (using column-first ordering):
+
+```
+input grid     kernel    output
+A B C           a b       W X
+D E F           c d       Y Z
+G H I
+```
+
+For each output pixel, the microkernel needs `kernel_height × kernel_width` input pointers. The naive (row-first) ordering produces:
+
+```
+output W: [A, B, D, E]   (reads for kernel positions a, b, c, d)
+output X: [B, C, E, F]
+```
+
+Laid out flat in the buffer:
+
+```text
+row-first: A  B  D  E  B  C  E  F
+```
+
+XNNPACK instead uses **column-first** ordering (iterate kernel columns in the outer loop):
+
+```text
+column-first uncompressed: A  D  B  E  B  E  C  F
+```
+
+Notice `B E` repeats for the two adjacent output pixels. This repetition is the key to compression.
+
+## Column-first compression
+
+In the column-first layout, adjacent output pixels share all but the first and last kernel column:
+
+```text
+column-first uncompressed:  A  D  B  E  B  E  C  F
+                                       ↑──── shared ────↑
+column-first compressed:    A  D  B  E  C  F
+```
+
+Instead of storing the repeated `B E` twice, the buffer stores it once and the microkernel is told to step by `input_stride` bytes (which is less than `kernel_size` pointers) to reach the indirection data for the next output pixel.
+
+`input_stride` is the number of bytes to add to the `input` pointer to advance from one output pixel's pointers to the next. With compression, this is smaller than `kernel_tile * sizeof(pointer)`.
+
+<Note>
+The weights buffer must also be packed in column-first order, matching the access pattern of the compressed indirection buffer.
+</Note>
+
+## The `input_offset` compression parameter
+
+For a typical convolution over multiple output rows, the indirection buffer along the Y dimension follows a regular pattern. Consider a 2×3 kernel on a larger input:
+
+```
+indirection buffers (column-first compressed, one row each):
+row 0:  A  D  B  E  C  F
+row 1:  D  G  E  H  F  I
+row 2:  G  J  H  K  I  L
+row 3:  J  M  K  N  L  O
+```
+
+Each row is a constant stride of 3 (the input width) away from the previous row. Rather than storing all these rows, XNNPACK stores **one row** of the indirection buffer and provides a scalar `input_offset` that is added to every pointer in that row:
+
+```text
+stored row:        A  D  B  E  C  F
+
+output row 0:  add offset 0  →  A+0   D+0   B+0   E+0   C+0   F+0
+output row 1:  add offset 3  →  A+3   D+3   B+3   E+3   C+3   F+3  (= D, G, E, H, C+3, F+3)
+output row 2:  add offset 6  →  A+6   D+6   …
+```
+
+The microkernel receives `input_offset` as an argument and adds it to every pointer it dereferences — unless the pointer equals the `zero` buffer (indicating padding).
+
+## Zero-padding via the zero buffer
+
+Left, right, top, and bottom padding positions have their indirection pointer set to a shared `zero` buffer — a read-only region filled with zeros. The microkernel checks each pointer before adding `input_offset`:
+
+```c
+const float* i0 = input[0];
+if XNN_UNPREDICTABLE(i0 != zero) {
+    i0 = (const float*) ((uintptr_t) i0 + input_offset);
+}
+```
+
+If `i0` is the zero buffer, `input_offset` is **not** added. This keeps the pointer pointing at zeros regardless of the offset, correctly modeling zero-padding without any special-case branching in the arithmetic portion of the microkernel.
+
+## The 3-section structure for top and bottom padding
+
+The offset compression breaks down at the top and bottom of the output, where padding rows mix with real rows. For example, with 1 row of top padding:
+
+```
+input grid (with padding):
+0 0 0           ← top padding row
+A B C
+D E F
+G H I
+0 0 0           ← bottom padding row
+```
+
+The naive compressed buffer would produce:
+
+```
+row 0: 0  A  0  B  0  C   (top padding + first real row)
+row 1: 0  A  0  B  0  C + offset 3  ← WRONG: zero pointers must not be offset
+```
+
+Because zero-padded pointers must not have `input_offset` added, the simple offset trick only works for fully-interior rows.
+
+The solution is to split the indirection buffer into **three sections**:
+
+<Steps>
+  <Step title="Top section (uncompressed)">
+    One full indirection row for each output row affected by top padding. These rows contain a mix of zero-buffer pointers and real input pointers and are stored without compression.
+  </Step>
+  <Step title="Middle section (compressed)">
+    A single row of real input pointers. All output rows in the interior of the image use this one row, with different `input_offset` values.
+  </Step>
+  <Step title="Bottom section (uncompressed)">
+    One full indirection row for each output row affected by bottom padding, stored without compression.
+  </Step>
+</Steps>
+
+Example with 1 row of top/bottom padding and a 2×3 kernel:
+
+```
+input grid:
+0 0 0  ← padding
+A B C
+D E F
+G H I
+0 0 0  ← padding
+
+compressed indirection buffer:
+  top:    0  A  0  B  0  C     ← uncompressed row for output row 0
+  middle: A  D  B  E  C  F     ← single compressed row
+  bottom: G  0  H  0  I  0     ← uncompressed row for last output row
+```
+
+The compute function maps each output row to its section and offset:
+
+| `output_y` | Section | Row in buffer | `input_offset` |
+|---|---|---|---|
+| 0 | top | 0 | 0 |
+| 1 | middle | 1 | 0 |
+| 2 | middle | 1 | 3 |
+| 3 | bottom | 0 | 0 |
+
+## Parameters summary
+
+| Parameter | Description |
+|---|---|
+| `input` | Pointer into the indirection buffer for the current output row |
+| `input_stride` | Bytes to advance `input` per output pixel (enables column-first compression) |
+| `input_offset` | Scalar offset (in bytes) added to each pointer in the current row (enables Y-direction compression) |
+| `input_pixel_stride` | Amount `input_offset` increases per output pixel step |
+| `zero` | Pointer to the zero buffer; indirection entries set to this value indicate padding |
+
+## Memory footprint trade-offs
+
+The compressed buffer reduces memory from `output_height × output_width × kernel_size` pointers down to approximately:
+
+```
+(top_pad_rows + 1 + bottom_pad_rows) × compressed_row_length
+```
+
+For typical models with small kernels (3×3, 5×5) this is a large saving. For very deep networks or high-resolution inputs the savings become even more significant.
+
+<Info>
+Setting `XNN_FLAG_TRANSIENT_INDIRECTION_BUFFER` at operator creation causes XNNPACK to allocate the indirection buffer from a temporary workspace at runtime rather than keeping it allocated permanently. This reduces peak memory footprint at the cost of rebuilding the buffer on each inference call.
+</Info>
+
+## Further reading
+
+- Marat Dukhan, "The Indirect Convolution Algorithm," 2019 — [arXiv:1907.02129](https://arxiv.org/abs/1907.02129)
+- XNNPACK source: `src/operators/convolution-nhwc.c` — `xnn_compute_dwconv` and indirection buffer setup
+- XNNPACK source: `src/indirection.c` — indirection buffer construction routines

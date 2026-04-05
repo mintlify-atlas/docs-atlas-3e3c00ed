@@ -1,0 +1,135 @@
+---
+title: "Microkernels"
+description: "What microkernels are, how they work, architecture variants, and how XNNPACK selects them at runtime."
+---
+
+A **microkernel** (or `ukernel`) is a small, highly optimized compute function that performs a single, specific numerical operation on a fixed-size tile of data. Every operator in XNNPACK—convolution, pooling, elementwise math, matrix multiply—ultimately dispatches to one or more microkernels tuned for the active CPU's SIMD capabilities.
+
+The key design principle is that each microkernel is written once per architecture and reused across many different operator configurations. A single microkernel handles a fixed tile shape; the surrounding operator code calls the microkernel in a loop to cover arbitrary tensor sizes.
+
+## Microkernel types
+
+<CardGroup cols={2}>
+  <Card title="GEMM / IGEMM" icon="table">
+    General matrix multiply and its indirect variant. Used for fully-connected layers and direct convolutions. IGEMM reads matrix A through a level of pointer indirection.
+  </Card>
+  <Card title="DWCONV" icon="layers">
+    Depthwise convolution. Produces one row of output per call. Comes in uni-pass and multi-pass variants depending on kernel size.
+  </Card>
+  <Card title="AVGPOOL / MAXPOOL" icon="chart-bar">
+    Average and max pooling. Uni-pass variants handle up to a fixed number of elements; multi-pass variants handle arbitrary sizes with first/middle/last passes.
+  </Card>
+  <Card title="Elementwise" icon="function">
+    Unary (vtanh, vsigmoid, vsqrt…) and binary (vadd, vmul, vmin…) operations over contiguous vectors. Parameterized by batch tile size.
+  </Card>
+</CardGroup>
+
+Other microkernel families include `RMAX`/`RSUM` (reduce), `SPMM` (sparse matrix), `CONV` (direct convolution with explicit im2col), `LUT` (lookup-table quantization), and `TRANSPOSE`.
+
+## Architecture variants
+
+Each microkernel is compiled for one specific instruction set. XNNPACK ships variants for:
+
+| Architecture suffix | Description |
+|---|---|
+| `scalar` | Portable C reference; no SIMD. Used as fallback and for correctness testing. |
+| `neon` | ARM Advanced SIMD (32-bit and 64-bit). 128-bit vectors, 4× f32 lanes. |
+| `neonfma` | ARM NEON with fused multiply-add (`VFMA`). |
+| `neonv8_mlal` | ARMv8 NEON with `SMLAL` for 8-bit multiply-accumulate. |
+| `aarch32_neon_cortex_a55` | Hand-tuned assembly for the Cortex-A55 pipeline. |
+| `aarch64_neon_cortex_a55` | Hand-tuned aarch64 assembly for Cortex-A55. |
+| `sse` / `sse2` / `sse41` | x86 SSE/SSE2/SSE4.1, 128-bit vectors. |
+| `avx` / `fma3` | x86 AVX with or without FMA3, 256-bit vectors. |
+| `avx512f` / `avx512skx` | x86 AVX-512, 512-bit vectors. `skx` targets Skylake-X with additional BF16/VNNI extensions. |
+| `wasmsimd` / `wasmrelaxedsimd` | WebAssembly SIMD and Relaxed SIMD proposals. |
+| `hvx` | Qualcomm Hexagon HVX, 1024-bit vectors. |
+| `rvv` | RISC-V Vector extension (scalable vectors). |
+
+### Assembly vs. C microkernels
+
+Most microkernels are written in C using compiler intrinsics or auto-vectorizable scalar code. Performance-critical paths also have hand-written assembly variants (`.S` files) that exploit precise instruction scheduling and avoid compiler-induced overhead.
+
+Assembly microkernels are gated by `XNNPACK_ENABLE_ASSEMBLY` (enabled by default). When the build flag is off, XNNPACK falls back to the equivalent C intrinsic implementation.
+
+<Note>
+Assembly microkernels exist primarily for ARM (both aarch32 and aarch64). x86 microkernels rely on intrinsics because x86 compilers schedule SSE/AVX instructions well.
+</Note>
+
+## Runtime microkernel selection
+
+XNNPACK performs CPU feature detection once at initialization (`xnn_initialize`). It queries the CPU for supported instruction sets (CPUID on x86, `getauxval` / `mrs` on ARM, etc.) and builds a `xnn_hardware_config` struct recording which extensions are available.
+
+When an operator is created, XNNPACK walks a priority-ordered list of candidate microkernels for that operation and picks the first one whose architecture requirements are satisfied by the detected hardware. The selected microkernel function pointer is stored in the operator and called directly during inference—there is no per-call dispatch overhead.
+
+```c
+// Conceptual selection logic (simplified)
+if (hardware_config->use_arm_neon_fma) {
+    gemm_ukernel = xnn_f32_gemm_minmax_ukernel_4x8__neonfma;
+} else if (hardware_config->use_arm_neon) {
+    gemm_ukernel = xnn_f32_gemm_minmax_ukernel_4x8__neon;
+} else {
+    gemm_ukernel = xnn_f32_gemm_minmax_ukernel_2x4__scalar;
+}
+```
+
+## The MR × NR tile structure (GEMM)
+
+GEMM microkernels operate on a rectangular output tile of **MR rows × NR columns**. These values are baked into the microkernel name (e.g., `2x4` means MR=2, NR=4) and determine:
+
+- **MR** — how many rows of the activation matrix A are processed simultaneously. Larger MR amortizes the cost of loading B (weights) across more output rows.
+- **NR** — how many columns of B are accumulated per inner-loop iteration. NR is typically chosen to fill one SIMD register (e.g., NR=4 for 128-bit SSE with f32, NR=8 for 256-bit AVX).
+
+The surrounding operator code tiles the full matrix dimensions into MR × NR blocks and invokes the microkernel for each block. The final partial block passes `mr < MR` so the microkernel writes only the valid rows.
+
+```
+Output matrix C  (M rows × N cols)
+┌────────────────────────────────┐
+│  tile  │  tile  │  tile  │ ... │  ← MR rows each
+│ MR×NR  │ MR×NR  │ MR×NR  │    │
+├────────┼────────┼────────┤    │
+│ ...                            │
+└────────────────────────────────┘
+          └── NR cols each ──┘
+```
+
+## Channel tile concept
+
+For non-GEMM microkernels (DWCONV, pooling, elementwise), the equivalent of NR is the **channel tile** — the number of channels processed per iteration of the main loop. A separate remainder loop handles channels that do not fill a complete tile.
+
+The channel tile is chosen to match the SIMD width. For example:
+- `4c` on SSE (4 × f32 = 128 bits)
+- `8c` on AVX (8 × f32 = 256 bits)
+- `16c` on AVX-512 (16 × f32 = 512 bits)
+- `32c` or `64c` on HVX (Hexagon 1024-bit vectors)
+
+## Uni-pass vs. multi-pass variants
+
+Some microkernels come in two structural variants:
+
+<AccordionGroup>
+  <Accordion title="Uni-pass">
+    A single loop over all inputs. The kernel tile (number of input elements read per output) is fixed. Suitable when the kernel fits in registers.
+
+    Example: `xnn_f32_dwconv_minmax_ukernel_9p4c__neon` — 9-element kernel tile, 4-channel tile, single pass.
+  </Accordion>
+  <Accordion title="Multi-pass">
+    Splits the kernel dimension into **first**, **middle** (repeating), and **last** passes. Each pass accumulates into a persistent accumulator buffer. Used for large kernels (e.g., 25-tap or stride-2 depthwise convolution) where all inputs cannot be held in registers simultaneously.
+
+    Example DWCONV: `UfVmWlXcYsZr` — first pass tile `U`, middle `V`, last `W`, channel tile `X`, channel subtile `Y`, channel round `Z`.
+
+    Example avgpool: `xnn_f32_avgpool_minmax_ukernel_9p8x__neon_c4` — 9-element primary pass, 8-element incremental pass, 4-channel tile.
+  </Accordion>
+</AccordionGroup>
+
+## Microkernel enumerators
+
+XNNPACK uses a macro-expansion pattern to enumerate all microkernels of a given type without manually listing them everywhere. A `.inc` header defines one `XNN_UKERNEL(...)` invocation per microkernel; consumers `#define` the macro before including the header:
+
+```c
+#define XNN_UKERNEL(arch_flags, fn_name, batch_tile, vector_tile, datatype) \
+    printf("%s  batch_tile=%d\n", #fn_name, batch_tile);
+#include "src/f32-vtanh/f32-vtanh.inc"
+#undef XNN_UKERNEL
+```
+
+Tests, benchmarks, and dispatch tables are all generated this way. Adding a new microkernel only requires one manual edit: the `.inc` enumerator file.

@@ -1,0 +1,374 @@
+---
+title: "Pooling operators"
+description: "2D Average Pooling, Max Pooling, ArgMax Pooling, Global Average Pooling, and Unpooling in XNNPACK."
+---
+
+XNNPACK implements five pooling operators. All use NHWC layout and support both FP32 and FP16 data types.
+
+## 2D Average Pooling
+
+`xnn_define_average_pooling_2d` computes the mean of all elements inside each sliding pooling window.
+
+```c
+enum xnn_status xnn_define_average_pooling_2d(
+  xnn_subgraph_t subgraph,
+  uint32_t input_padding_top,
+  uint32_t input_padding_right,
+  uint32_t input_padding_bottom,
+  uint32_t input_padding_left,
+  uint32_t pooling_height,
+  uint32_t pooling_width,
+  uint32_t stride_height,
+  uint32_t stride_width,
+  float output_min,
+  float output_max,
+  uint32_t input_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+### Tensor shapes
+
+| Tensor | Shape |
+|---|---|
+| Input | `[N, IH, IW, channels]` |
+| Output | `[N, OH, OW, channels]` |
+
+### Parameters
+
+<ParamField path="input_padding_top" type="uint32_t" required>
+  Implicit zero-padding above the 2D input. Must be `0` when `XNN_FLAG_TENSORFLOW_SAME_PADDING` is set.
+</ParamField>
+
+<ParamField path="input_padding_right" type="uint32_t" required>
+  Implicit zero-padding to the right of the 2D input. Must be `0` when `XNN_FLAG_TENSORFLOW_SAME_PADDING` is set.
+</ParamField>
+
+<ParamField path="input_padding_bottom" type="uint32_t" required>
+  Implicit zero-padding below the 2D input. Must be `0` when `XNN_FLAG_TENSORFLOW_SAME_PADDING` is set.
+</ParamField>
+
+<ParamField path="input_padding_left" type="uint32_t" required>
+  Implicit zero-padding to the left of the 2D input. Must be `0` when `XNN_FLAG_TENSORFLOW_SAME_PADDING` is set.
+</ParamField>
+
+<ParamField path="pooling_height" type="uint32_t" required>
+  Height of the pooling window (kernel).
+</ParamField>
+
+<ParamField path="pooling_width" type="uint32_t" required>
+  Width of the pooling window (kernel).
+</ParamField>
+
+<ParamField path="stride_height" type="uint32_t" required>
+  Vertical displacement of the pooling window between vertically adjacent output pixels.
+</ParamField>
+
+<ParamField path="stride_width" type="uint32_t" required>
+  Horizontal displacement of the pooling window between horizontally adjacent output pixels.
+</ParamField>
+
+<ParamField path="output_min" type="float" required>
+  Lower bound for clamping output values. Use `-INFINITY` to disable.
+</ParamField>
+
+<ParamField path="output_max" type="float" required>
+  Upper bound for clamping output values. Use `+INFINITY` to disable.
+</ParamField>
+
+<ParamField path="input_id" type="uint32_t" required>
+  Value ID of the input tensor in the subgraph.
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID of the output tensor in the subgraph.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Bitmask of operator flags. Supported value: `XNN_FLAG_TENSORFLOW_SAME_PADDING`.
+</ParamField>
+
+### Microkernel variants
+
+Average Pooling uses two microkernel strategies:
+
+- **Uni-pass**: used when the pooling window fits entirely within the input (no boundary handling needed). A single pass over the window computes the sum and divides.
+- **Multi-pass**: used for large pooling windows that exceed register capacity. The window is divided into sub-windows and accumulated across multiple passes to avoid overflow.
+
+XNNPACK selects the appropriate variant automatically based on the pooling window size and hardware capabilities.
+
+### Usage example
+
+```c
+// 2x2 average pooling with stride 2
+enum xnn_status status = xnn_define_average_pooling_2d(
+  subgraph,
+  /*input_padding_top=*/0,
+  /*input_padding_right=*/0,
+  /*input_padding_bottom=*/0,
+  /*input_padding_left=*/0,
+  /*pooling_height=*/2,
+  /*pooling_width=*/2,
+  /*stride_height=*/2,
+  /*stride_width=*/2,
+  /*output_min=*/-INFINITY,
+  /*output_max=*/+INFINITY,
+  input_id,
+  output_id,
+  /*flags=*/0);
+```
+
+---
+
+## 2D Max Pooling
+
+`xnn_define_max_pooling_2d` selects the maximum value within each pooling window.
+
+```c
+enum xnn_status xnn_define_max_pooling_2d(
+  xnn_subgraph_t subgraph,
+  uint32_t input_padding_top,
+  uint32_t input_padding_right,
+  uint32_t input_padding_bottom,
+  uint32_t input_padding_left,
+  uint32_t pooling_height,
+  uint32_t pooling_width,
+  uint32_t stride_height,
+  uint32_t stride_width,
+  uint32_t dilation_height,
+  uint32_t dilation_width,
+  float output_min,
+  float output_max,
+  uint32_t input_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+### Tensor shapes
+
+| Tensor | Shape |
+|---|---|
+| Input | `[N, IH, IW, channels]` |
+| Output | `[N, OH, OW, channels]` |
+
+### Additional parameters (compared to average pooling)
+
+<ParamField path="dilation_height" type="uint32_t" required>
+  Dilation factor for pooling elements along the height dimension. Use `1` for standard (non-dilated) pooling.
+</ParamField>
+
+<ParamField path="dilation_width" type="uint32_t" required>
+  Dilation factor for pooling elements along the width dimension.
+</ParamField>
+
+All other parameters follow the same conventions as `xnn_define_average_pooling_2d`.
+
+### Flags
+
+| Flag | Description |
+|---|---|
+| `XNN_FLAG_TENSORFLOW_SAME_PADDING` | Use TensorFlow "SAME" padding. All explicit padding parameters must be `0`. |
+
+### Usage example
+
+```c
+// 3x3 max pooling with stride 2 and dilation 1
+enum xnn_status status = xnn_define_max_pooling_2d(
+  subgraph,
+  /*input_padding_top=*/1,
+  /*input_padding_right=*/1,
+  /*input_padding_bottom=*/1,
+  /*input_padding_left=*/1,
+  /*pooling_height=*/3,
+  /*pooling_width=*/3,
+  /*stride_height=*/2,
+  /*stride_width=*/2,
+  /*dilation_height=*/1,
+  /*dilation_width=*/1,
+  /*output_min=*/-INFINITY,
+  /*output_max=*/+INFINITY,
+  input_id,
+  output_id,
+  /*flags=*/0);
+```
+
+---
+
+## 2D ArgMax Pooling
+
+`xnn_define_argmax_pooling_2d` performs max pooling and simultaneously records the flat index of the maximum value within each pool window. The index output is used with `xnn_define_unpooling_2d` to invert the operation.
+
+```c
+enum xnn_status xnn_define_argmax_pooling_2d(
+  xnn_subgraph_t subgraph,
+  uint32_t input_padding_top,
+  uint32_t input_padding_right,
+  uint32_t input_padding_bottom,
+  uint32_t input_padding_left,
+  uint32_t pooling_height,
+  uint32_t pooling_width,
+  uint32_t input_id,
+  uint32_t output_value_id,
+  uint32_t output_index_id,
+  uint32_t flags);
+```
+
+### Tensor shapes
+
+| Tensor | Shape |
+|---|---|
+| Input | `[N, IH, IW, channels]` |
+| Output (values) | `[N, OH, OW, channels]` |
+| Output (indices) | `[N, OH, OW, channels]` |
+
+<Info>
+The stride between pooling regions equals the pooling window size (`pooling_height` × `pooling_width`). Non-overlapping pooling windows are required.
+</Info>
+
+### Parameters
+
+<ParamField path="output_value_id" type="uint32_t" required>
+  Value ID for the tensor that receives the maximum values from each pool.
+</ParamField>
+
+<ParamField path="output_index_id" type="uint32_t" required>
+  Value ID for the tensor that receives the flat index of the maximum value within each pool window. This tensor is intended as input to `xnn_define_unpooling_2d`.
+</ParamField>
+
+---
+
+## Global Average Pooling
+
+`xnn_define_global_average_pooling_2d` reduces all spatial positions by computing the average per channel.
+
+```c
+enum xnn_status xnn_define_global_average_pooling_2d(
+  xnn_subgraph_t subgraph,
+  float output_min,
+  float output_max,
+  uint32_t input_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+### Tensor shapes
+
+The input tensor must have 3 or more dimensions. Averaging is performed across the second- and third-innermost dimensions (H and W for a 4D NHWC tensor).
+
+| Tensor | Example shape |
+|---|---|
+| Input | `[N, H, W, C]` |
+| Output | `[N, 1, 1, C]` or `[N, C]` depending on `XNN_FLAG_KEEP_DIMS` |
+
+### Flags
+
+| Flag | Description |
+|---|---|
+| `XNN_FLAG_KEEP_DIMS` | Retain reduced dimensions as size-1 dimensions in the output. |
+
+<Note>
+`xnn_define_global_average_pooling_2d` is deprecated. Use `xnn_define_static_reduce` with `xnn_reduce_mean` for new code.
+</Note>
+
+---
+
+## 2D Unpooling
+
+`xnn_define_unpooling_2d` is the inverse of ArgMax Pooling. It scatters each input value back to the position indicated by the corresponding index, zero-filling all other positions.
+
+```c
+enum xnn_status xnn_define_unpooling_2d(
+  xnn_subgraph_t subgraph,
+  uint32_t padding_top,
+  uint32_t padding_right,
+  uint32_t padding_bottom,
+  uint32_t padding_left,
+  uint32_t pooling_height,
+  uint32_t pooling_width,
+  uint32_t input_value_id,
+  uint32_t input_index_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+### Tensor shapes
+
+| Tensor | Shape |
+|---|---|
+| Input (values) | `[N, IH, IW, channels]` |
+| Input (indices) | `[N, IH, IW, channels]` |
+| Output | `[N, OH, OW, channels]` |
+
+### Parameters
+
+<ParamField path="padding_top" type="uint32_t" required>
+  Implicit padding above the 2D output.
+</ParamField>
+
+<ParamField path="padding_right" type="uint32_t" required>
+  Implicit padding to the right of the 2D output.
+</ParamField>
+
+<ParamField path="padding_bottom" type="uint32_t" required>
+  Implicit padding below the 2D output.
+</ParamField>
+
+<ParamField path="padding_left" type="uint32_t" required>
+  Implicit padding to the left of the 2D output.
+</ParamField>
+
+<ParamField path="pooling_height" type="uint32_t" required>
+  Height of the pooling window used in the corresponding ArgMax Pooling operation.
+</ParamField>
+
+<ParamField path="pooling_width" type="uint32_t" required>
+  Width of the pooling window used in the corresponding ArgMax Pooling operation.
+</ParamField>
+
+<ParamField path="input_value_id" type="uint32_t" required>
+  Value ID for the max-pooled values tensor (produced by `xnn_define_argmax_pooling_2d`).
+</ParamField>
+
+<ParamField path="input_index_id" type="uint32_t" required>
+  Value ID for the indices tensor produced by `xnn_define_argmax_pooling_2d`.
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID for the output tensor.
+</ParamField>
+
+### Usage pattern
+
+<Steps>
+  <Step title="Define ArgMax Pooling">
+    Add an ArgMax Pooling node to your subgraph. Save both the value and index output IDs.
+
+    ```c
+    xnn_define_argmax_pooling_2d(
+      subgraph,
+      0, 0, 0, 0,        // no padding
+      2, 2,              // 2x2 pool
+      input_id,
+      pooled_value_id,
+      pooled_index_id,
+      0);
+    ```
+  </Step>
+  <Step title="Process the pooled values">
+    Apply any additional operations to the pooled values tensor (e.g., convolution layers in an encoder–decoder network).
+  </Step>
+  <Step title="Define Unpooling">
+    Scatter the processed values back to their original positions using the saved indices.
+
+    ```c
+    xnn_define_unpooling_2d(
+      subgraph,
+      0, 0, 0, 0,        // no padding
+      2, 2,              // must match ArgMax pool size
+      processed_value_id,
+      pooled_index_id,
+      output_id,
+      0);
+    ```
+  </Step>
+</Steps>

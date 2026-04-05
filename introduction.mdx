@@ -1,0 +1,183 @@
+---
+title: "Introduction"
+description: "XNNPACK is a highly optimized library of neural network inference primitives for ARM, x86, WebAssembly, RISC-V, and Hexagon platforms."
+---
+
+## What is XNNPACK?
+
+XNNPACK is a highly optimized solution for neural network inference on ARM, x86, WebAssembly, and RISC-V platforms. It provides low-level performance primitives designed to accelerate high-level machine learning frameworks rather than serving as a direct interface for deep learning practitioners.
+
+The library focuses on delivering maximum throughput for feed-forward inference workloads. It achieves this through hand-written assembly micro-kernels, architecture-specific SIMD vectorization, and graph-level optimizations such as operator fusion, sparse inference, and memory layout reuse.
+
+<Note>
+XNNPACK is not intended for direct use by deep learning researchers. It is a backend acceleration library consumed by frameworks like TensorFlow Lite, PyTorch Mobile, and ONNX Runtime.
+</Note>
+
+## Supported architectures
+
+XNNPACK targets a broad range of CPU and DSP architectures with platform-specific micro-kernels for each.
+
+<CardGroup cols={2}>
+  <Card title="ARM" icon="microchip">
+    - **ARM64** — Android, iOS, macOS, Linux, Windows
+    - **ARMv7** with NEON — Android
+    - **ARMv6** with VFPv2 — Linux
+  </Card>
+  <Card title="x86 / x86-64" icon="computer">
+    - SSE2 through **AVX512**
+    - Windows, Linux, macOS, Android, iOS simulator
+  </Card>
+  <Card title="WebAssembly" icon="globe">
+    - **WebAssembly MVP**
+    - **WebAssembly SIMD**
+    - **WebAssembly Relaxed SIMD** (experimental)
+  </Card>
+  <Card title="RISC-V & Hexagon" icon="circuit-board">
+    - **RISC-V** RV32GC and RV64GC
+    - **Hexagon** with HVX
+  </Card>
+</CardGroup>
+
+## Operator coverage
+
+XNNPACK implements the following neural network operators:
+
+### Spatial operators
+
+| Operator | Notes |
+|---|---|
+| 2D Convolution | Including grouped and depthwise |
+| 2D Deconvolution | Also known as Transposed Convolution |
+| 2D Average Pooling | |
+| 2D Max Pooling | |
+| 2D ArgMax Pooling | Max Pooling combined with index output |
+| 2D Unpooling | |
+| 2D Bilinear Resize | |
+| 2D Depth-to-Space | Also known as Pixel Shuffle |
+
+### Elementwise and broadcasting operators
+
+| Operator | Notes |
+|---|---|
+| Add | Including broadcasting; two inputs only |
+| Subtract | Including broadcasting |
+| Divide | Including broadcasting |
+| Maximum | Including broadcasting |
+| Minimum | Including broadcasting |
+| Multiply | Including broadcasting |
+| Squared Difference | Including broadcasting |
+
+### Reduction and structural operators
+
+| Operator | Notes |
+|---|---|
+| Global Average Pooling | |
+| Channel Shuffle | |
+| Fully Connected | |
+| Transpose | |
+
+### Pointwise unary operators
+
+| Operator | Notes |
+|---|---|
+| Abs | Absolute value |
+| Bankers' Rounding | Round to nearest, ties to even |
+| Ceiling | Round to integer above |
+| Clamp | Includes ReLU and ReLU6 |
+| Convert | Fixed-point and half-precision quantization / dequantization |
+| Copy | |
+| ELU | |
+| Floor | Round to integer below |
+| HardSwish | |
+| Leaky ReLU | |
+| Negate | |
+| PReLU | |
+| Sigmoid | |
+| Softmax | |
+| Square | |
+| Tanh | |
+| Truncation | Round to integer towards zero |
+
+<Info>
+All operators support **NHWC layout** and allow a custom stride along the channel dimension. This means operators can consume or produce a subset of channels in a tensor, providing zero-cost Channel Split and Channel Concatenation.
+</Info>
+
+## Performance
+
+### Mobile phones (single-threaded)
+
+Benchmarked on Android/ARM64 with Android NDK r21, March 2020.
+
+| Model | Pixel, ms | Pixel 2, ms | Pixel 3a, ms |
+|---|:---:|:---:|:---:|
+| FP32 MobileNet v1 1.0X | 82 | 86 | 88 |
+| FP32 MobileNet v2 1.0X | 49 | 53 | 55 |
+| FP32 MobileNet v3 Large | 39 | 42 | 44 |
+| FP32 MobileNet v3 Small | 12 | 14 | 14 |
+
+### Mobile phones (multi-threaded, big cores only)
+
+| Model | Pixel, ms | Pixel 2, ms | Pixel 3a, ms |
+|---|:---:|:---:|:---:|
+| FP32 MobileNet v1 1.0X | 43 | 27 | 46 |
+| FP32 MobileNet v2 1.0X | 26 | 18 | 28 |
+| FP32 MobileNet v3 Large | 22 | 16 | 24 |
+| FP32 MobileNet v3 Small | 7 | 6 | 8 |
+
+### Raspberry Pi (multi-threaded)
+
+Benchmarked on Raspbian Buster with a CMake build, February 2022.
+
+| Model | RPi Zero W (BCM2835), ms | RPi 2 (BCM2836), ms | RPi 3+ (BCM2837B0), ms | RPi 4 (BCM2711), ms | RPi 4 ARM64, ms |
+|---|:---:|:---:|:---:|:---:|:---:|
+| FP32 MobileNet v1 1.0X | 3919 | 302 | 114 | 72 | 77 |
+| FP32 MobileNet v2 1.0X | 1987 | 191 | 79 | 41 | 46 |
+| FP32 MobileNet v3 Large | 1658 | 161 | 67 | 38 | 40 |
+| FP32 MobileNet v3 Small | 474 | 50 | 22 | 13 | 15 |
+| INT8 MobileNet v1 1.0X | 2589 | 128 | 46 | 29 | 24 |
+| INT8 MobileNet v2 1.0X | 1495 | 82 | 30 | 20 | 17 |
+
+<Note>
+INT8 inference was evaluated using a per-channel quantization schema.
+</Note>
+
+## Ecosystem integrations
+
+XNNPACK powers neural network inference across a wide range of ML frameworks and runtimes.
+
+<CardGroup cols={2}>
+  <Card title="TensorFlow Lite" href="https://blog.tensorflow.org/2020/07/accelerating-tensorflow-lite-xnnpack-integration.html">
+    On-device inference for mobile and embedded devices. XNNPACK is the default acceleration backend for floating-point and quantized models.
+  </Card>
+  <Card title="TensorFlow.js" href="https://blog.tensorflow.org/2020/03/introducing-webassembly-backend-for-tensorflow-js.html">
+    WebAssembly backend enabling accelerated in-browser inference using XNNPACK SIMD kernels.
+  </Card>
+  <Card title="PyTorch Mobile" href="https://pytorch.org/mobile">
+    Mobile inference runtime for PyTorch models, using XNNPACK for CPU operator execution on ARM and x86 devices.
+  </Card>
+  <Card title="ONNX Runtime" href="https://onnxruntime.ai/docs/execution-providers/Xnnpack-ExecutionProvider.html">
+    XNNPACK Execution Provider for accelerated mobile and embedded inference from ONNX models.
+  </Card>
+  <Card title="ExecuTorch" href="https://pytorch.org/executorch-overview">
+    PyTorch's on-device AI framework, with XNNPACK as a first-class backend for edge deployment.
+  </Card>
+  <Card title="MediaPipe" href="https://developers.googleblog.com/2020/01/mediapipe-on-web.html">
+    Google's cross-platform ML pipeline framework, using XNNPACK for web and mobile compute.
+  </Card>
+</CardGroup>
+
+Additional integrations include [Alibaba HALO](https://github.com/alibaba/heterogeneity-aware-lowering-and-optimization) (Heterogeneity-Aware Lowering and Optimization) and [Samsung ONE](https://github.com/Samsung/ONE) (On-device Neural Engine).
+
+## Minimum build requirements
+
+| Requirement | Version |
+|---|---|
+| C standard | C11 |
+| C++ standard | C++17 |
+| Python | 3.x |
+
+See the [building guide](/building) for full toolchain and platform requirements.
+
+## Origins
+
+XNNPACK is based on [QNNPACK](https://github.com/pytorch/QNNPACK), originally developed at Facebook. The codebase has diverged substantially over time and the XNNPACK API is no longer compatible with QNNPACK.

@@ -1,0 +1,199 @@
+---
+title: "Matrix multiply operators"
+description: "Fully Connected (dense) layers and Batch Matrix Multiply in XNNPACK."
+---
+
+XNNPACK provides two linear algebra operators: `xnn_define_fully_connected` for dense layers and `xnn_define_batch_matrix_multiply` for general batched matrix products.
+
+## Fully Connected
+
+`xnn_define_fully_connected` defines a dense (fully connected) linear layer: `output = input * Wᵀ + bias`. It supports FP32, FP16, and a variety of quantized formats including per-channel quantized weights (`qcint8`, `qcint4`, `qcint2`) and dynamically quantized inputs (`qdint8`, `qpint8`).
+
+```c
+enum xnn_status xnn_define_fully_connected(
+  xnn_subgraph_t subgraph,
+  float output_min,
+  float output_max,
+  uint32_t input_id,
+  uint32_t filter_id,
+  uint32_t bias_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+### Tensor shapes
+
+The filter layout depends on the `XNN_FLAG_TRANSPOSE_WEIGHTS` flag:
+
+| Configuration | Filter shape |
+|---|---|
+| Default | `[output_channels, input_channels]` |
+| `XNN_FLAG_TRANSPOSE_WEIGHTS` | `[input_channels, output_channels]` |
+
+| Tensor | Shape |
+|---|---|
+| Input | N-dimensional; last dimension = `input_channels` |
+| Filter | 2D (see above) |
+| Bias (optional) | `[output_channels]` |
+| Output | Same rank as input; last dimension = `output_channels` |
+
+For a 2D input of shape `[batch_size, input_channels]`, the output is `[batch_size, output_channels]`.
+
+### Parameters
+
+<ParamField path="output_min" type="float" required>
+  Lower bound for clamping output values. Use `-INFINITY` to disable.
+</ParamField>
+
+<ParamField path="output_max" type="float" required>
+  Upper bound for clipping output values. Use `+INFINITY` to disable.
+</ParamField>
+
+<ParamField path="input_id" type="uint32_t" required>
+  Value ID of the input tensor. Must be at least 1D. Its last dimension must equal the `input_channels` dimension of the filter.
+</ParamField>
+
+<ParamField path="filter_id" type="uint32_t" required>
+  Value ID of the filter (weight) tensor. Must be a 2D tensor defined in the subgraph.
+</ParamField>
+
+<ParamField path="bias_id" type="uint32_t" required>
+  Value ID of the bias tensor, or `XNN_INVALID_VALUE_ID` to omit the bias.
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID of the output tensor.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Bitmask of operator flags.
+</ParamField>
+
+### Flags
+
+| Flag | Value | Description |
+|---|---|---|
+| `XNN_FLAG_TRANSPOSE_WEIGHTS` | `0x00000001` | Interpret the filter tensor as `[input_channels, output_channels]` instead of `[output_channels, input_channels]`. |
+
+### Supported data type combinations
+
+| Input | Weights | Output |
+|---|---|---|
+| FP32 | FP32 | FP32 |
+| FP16 | FP16 | FP16 |
+| FP32 | FP16 | FP32 |
+| `qdint8` | `qcint8` | FP32 or FP16 |
+| `qdint8` | `qcint4` | FP32 or FP16 |
+| `qdint8` | `qcint2` | FP32 or FP16 |
+| `qdint8` | `qbint4` (blockwise) | FP32 or FP16 |
+| `qint8` | `qcint8` | `qint8` |
+| `quint8` | `quint8` | `quint8` |
+
+### Internal algorithm: Indirect GEMM (IGEMM)
+
+Fully Connected layers in XNNPACK are executed using the **Indirect GEMM (IGEMM)** algorithm. In this approach, instead of directly accessing input data, the microkernel reads through an *indirection buffer* — a pre-computed array of pointers (or offsets) into the input tensor. This allows the same high-throughput GEMM microkernel to handle arbitrary strides, non-contiguous inputs, and batched inference without memory copies.
+
+<Tip>
+The `XNN_FLAG_TRANSIENT_INDIRECTION_BUFFER` flag instructs XNNPACK to allocate the indirection buffer from a transient workspace rather than from persistent memory. This reduces peak memory footprint at the cost of rebuilding the buffer on each inference call.
+</Tip>
+
+### Usage example
+
+```c
+// Fully connected: 512 input channels -> 256 output channels
+enum xnn_status status = xnn_define_fully_connected(
+  subgraph,
+  /*output_min=*/-INFINITY,
+  /*output_max=*/+INFINITY,
+  input_id,
+  filter_id,
+  bias_id,
+  output_id,
+  /*flags=*/0);
+```
+
+To use a transposed weight matrix (e.g., weights stored as `[input_channels, output_channels]`):
+
+```c
+status = xnn_define_fully_connected(
+  subgraph,
+  -INFINITY, +INFINITY,
+  input_id,
+  filter_id,    // shape: [input_channels, output_channels]
+  bias_id,
+  output_id,
+  XNN_FLAG_TRANSPOSE_WEIGHTS);
+```
+
+---
+
+## Batch Matrix Multiply
+
+`xnn_define_batch_matrix_multiply` computes a batched matrix product: `output[b] = input1[b] @ input2[b]` (with optional transposition). Both inputs must be at least 3D.
+
+```c
+enum xnn_status xnn_define_batch_matrix_multiply(
+  xnn_subgraph_t subgraph,
+  uint32_t input1_id,
+  uint32_t input2_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+### Tensor shapes
+
+Let N be the number of dimensions. The first N-2 dimensions are the batch dimensions and must match between the two inputs (or be broadcast-compatible when `XNN_FLAG_NO_BROADCAST` is not set).
+
+| Configuration | input1 last 2 dims | input2 last 2 dims | output last 2 dims |
+|---|---|---|---|
+| Default | `[M, K]` | `[K, N]` | `[M, N]` |
+| `XNN_FLAG_TRANSPOSE_B` | `[M, K]` | `[N, K]` | `[M, N]` |
+
+### Parameters
+
+<ParamField path="input1_id" type="uint32_t" required>
+  Value ID of the first input tensor. Must be at least 3D. The last two dimensions are `[M, K]`. Batch dimensions must match or be broadcast-compatible with `input2`.
+</ParamField>
+
+<ParamField path="input2_id" type="uint32_t" required>
+  Value ID of the second input tensor. Must be at least 3D. The last two dimensions are `[K, N]` (or `[N, K]` with `XNN_FLAG_TRANSPOSE_B`). Batch dimensions must match or be broadcast-compatible with `input1`.
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID of the output tensor. Must be at least 3D. The last two dimensions are `[M, N]`. Batch dimensions equal the element-wise maximum of the corresponding input batch dimensions.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Bitmask of operator flags.
+</ParamField>
+
+### Flags
+
+| Flag | Value | Description |
+|---|---|---|
+| `XNN_FLAG_TRANSPOSE_B` | `0x00000001` | Transpose `input2` before multiplying. `input2` must have shape `[batch…, N, K]` instead of `[batch…, K, N]`. Equivalent to `XNN_FLAG_TRANSPOSE_WEIGHTS`. |
+| `XNN_FLAG_NO_BROADCAST` | `0x00001000` | Assert that no batch-dimension broadcasting is required. May enable additional optimisations. |
+
+### Usage example
+
+```c
+// Batched matrix multiply: [batch, heads, seq, dim] @ [batch, heads, dim, seq]
+// input2 is transposed so its shape is [batch, heads, seq, dim]
+enum xnn_status status = xnn_define_batch_matrix_multiply(
+  subgraph,
+  query_id,     // [batch, heads, seq_q, dim]
+  key_id,       // [batch, heads, seq_k, dim]  (will be transposed)
+  output_id,    // [batch, heads, seq_q, seq_k]
+  XNN_FLAG_TRANSPOSE_B);
+```
+
+---
+
+## Flag reference
+
+| Flag | Value | Applies to |
+|---|---|---|
+| `XNN_FLAG_TRANSPOSE_WEIGHTS` | `0x00000001` | Fully Connected |
+| `XNN_FLAG_TRANSPOSE_B` | `0x00000001` | Batch Matrix Multiply (alias for `TRANSPOSE_WEIGHTS`) |
+| `XNN_FLAG_NO_BROADCAST` | `0x00001000` | Batch Matrix Multiply |
+| `XNN_FLAG_TRANSIENT_INDIRECTION_BUFFER` | `0x00000020` | Fully Connected (memory optimisation) |

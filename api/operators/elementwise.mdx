@@ -1,0 +1,304 @@
+---
+title: "Elementwise Operator API"
+description: "Reference documentation for unary and binary elementwise xnn_define_* and xnn_define_unary / xnn_define_binary node functions."
+---
+
+# Elementwise Operators
+
+XNNPACK exposes elementwise operations through two unified APIs — `xnn_define_unary` and
+`xnn_define_binary` — as well as a set of legacy per-operation functions that wrap them.
+The unified APIs are preferred for new code.
+
+All functions add a Node to a `xnn_subgraph_t`. All return an `enum xnn_status`.
+
+---
+
+## Unified Unary API
+
+### `xnn_define_unary`
+
+Define a single-input elementwise operator Node and add it to a Subgraph.
+
+```c
+enum xnn_status xnn_define_unary(
+  xnn_subgraph_t subgraph,
+  enum xnn_unary_operator type,
+  const union xnn_unary_params* params,
+  uint32_t input_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph object that will own the created Node.
+</ParamField>
+
+<ParamField path="type" type="enum xnn_unary_operator" required>
+  The specific unary operation to apply. See the table of supported operators below.
+</ParamField>
+
+<ParamField path="params" type="const union xnn_unary_params*" required>
+  Optional parameters interpreted by the specific operator. Pass `NULL` for operators that do not
+  require parameters. For `xnn_unary_clamp`, supply `params->clamp.min` and `params->clamp.max`.
+  For `xnn_unary_elu`, supply `params->elu.alpha`. For `xnn_unary_leaky_relu`, supply
+  `params->leaky_relu.negative_slope`.
+</ParamField>
+
+<ParamField path="input_id" type="uint32_t" required>
+  Value ID for the input tensor. Must be defined in the subgraph.
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID for the output tensor. Must be defined in the subgraph with the same shape as the input.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Bitfield of behavioral flags. No flags are currently defined; pass `0`.
+</ParamField>
+
+#### Supported Unary Operators (`enum xnn_unary_operator`)
+
+| Enumerator | Description |
+|---|---|
+| `xnn_unary_abs` | Elementwise absolute value: `y = |x|` |
+| `xnn_unary_approxgelu` | Approximate GELU: `0.5 * x * (1 + tanh(√(2/π) * (x + 0.044715 * x³)))` |
+| `xnn_unary_bankers_rounding` | Round to nearest even (banker's rounding) |
+| `xnn_unary_ceiling` | Round up to nearest integer: `y = ceil(x)` |
+| `xnn_unary_clamp` | Clip values: `y = clamp(x, params->clamp.min, params->clamp.max)` |
+| `xnn_unary_convert` | Type conversion between supported data types |
+| `xnn_unary_cosine` | Elementwise cosine: `y = cos(x)` |
+| `xnn_unary_elu` | Exponential Linear Unit: `y = x > 0 ? x : alpha * (exp(x) - 1)`, `alpha` from params |
+| `xnn_unary_exp` | Elementwise exponential: `y = exp(x)` |
+| `xnn_unary_floor` | Round down to nearest integer: `y = floor(x)` |
+| `xnn_unary_gelu` | Exact GELU activation |
+| `xnn_unary_hardswish` | Hard-Swish: `y = x * relu6(x + 3) / 6` |
+| `xnn_unary_leaky_relu` | Leaky ReLU: `y = x >= 0 ? x : negative_slope * x` |
+| `xnn_unary_log` | Elementwise natural log: `y = log(x)` |
+| `xnn_unary_negate` | Elementwise negation: `y = -x` |
+| `xnn_unary_reciprocal_square_root` | `y = 1 / sqrt(x)` |
+| `xnn_unary_sigmoid` | Sigmoid: `y = 1 / (1 + exp(-x))` |
+| `xnn_unary_sine` | Elementwise sine: `y = sin(x)` |
+| `xnn_unary_square` | Elementwise square: `y = x * x` |
+| `xnn_unary_square_root` | Elementwise square root: `y = sqrt(x)` |
+| `xnn_unary_tanh` | Hyperbolic tangent: `y = tanh(x)` |
+
+#### `union xnn_unary_params`
+
+```c
+union xnn_unary_params {
+  struct { float min; float max; } clamp;       // for xnn_unary_clamp
+  struct { float alpha; } elu;                  // for xnn_unary_elu
+  struct { float negative_slope; } leaky_relu;  // for xnn_unary_leaky_relu
+};
+```
+
+#### Usage Example
+
+```c
+#include <xnnpack.h>
+
+// Leaky ReLU with negative_slope = 0.01
+union xnn_unary_params params;
+params.leaky_relu.negative_slope = 0.01f;
+
+enum xnn_status status = xnn_define_unary(
+  subgraph,
+  xnn_unary_leaky_relu,
+  &params,
+  input_id,
+  output_id,
+  /*flags=*/ 0);
+
+// Clamp (ReLU6)
+union xnn_unary_params clamp_params;
+clamp_params.clamp.min = 0.0f;
+clamp_params.clamp.max = 6.0f;
+
+status = xnn_define_unary(
+  subgraph,
+  xnn_unary_clamp,
+  &clamp_params,
+  input_id,
+  output_id,
+  /*flags=*/ 0);
+```
+
+---
+
+## Unified Binary API
+
+### `xnn_define_binary`
+
+Define a two-input elementwise operator Node and add it to a Subgraph.
+
+```c
+enum xnn_status xnn_define_binary(
+  xnn_subgraph_t subgraph,
+  enum xnn_binary_operator type,
+  const struct xnn_binary_params* params,
+  uint32_t input1_id,
+  uint32_t input2_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph object that will own the created Node.
+</ParamField>
+
+<ParamField path="type" type="enum xnn_binary_operator" required>
+  The specific binary operation to apply.
+</ParamField>
+
+<ParamField path="params" type="const struct xnn_binary_params*" required>
+  Optional parameters. Currently carries `output_min` and `output_max` for output clamping. Pass
+  `NULL` to disable clamping (equivalent to `-∞` / `+∞`).
+</ParamField>
+
+<ParamField path="input1_id" type="uint32_t" required>
+  Value ID for the first input tensor. Each dimension must either match the corresponding dimension
+  of the second input, or be `1` (broadcast).
+</ParamField>
+
+<ParamField path="input2_id" type="uint32_t" required>
+  Value ID for the second input tensor. Each dimension must either match the corresponding dimension
+  of the first input, or be `1` (broadcast).
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID for the output tensor. Shape is the element-wise maximum of the two inputs' shapes
+  after NumPy-style broadcasting.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Bitfield of behavioral flags. `XNN_FLAG_NO_BROADCAST` signals that no broadcasting is required,
+  allowing potential optimizations.
+</ParamField>
+
+#### Supported Binary Operators (`enum xnn_binary_operator`)
+
+| Enumerator | Expression |
+|---|---|
+| `xnn_binary_add` | `y = x1 + x2` |
+| `xnn_binary_subtract` | `y = x1 - x2` |
+| `xnn_binary_multiply` | `y = x1 * x2` |
+| `xnn_binary_divide` | `y = x1 / x2` |
+| `xnn_binary_maximum` | `y = max(x1, x2)` |
+| `xnn_binary_minimum` | `y = min(x1, x2)` |
+| `xnn_binary_copysign` | `y = copysign(x1, x2)` (magnitude of x1, sign of x2) |
+| `xnn_binary_squared_difference` | `y = (x1 - x2)²` |
+| `xnn_binary_prelu` | `y = x1 >= 0 ? x1 : x1 * x2` (parametric ReLU) |
+
+#### Broadcasting Rules
+
+Broadcasting follows NumPy rules: dimensions are aligned from the right, and any dimension of
+size `1` is implicitly expanded to match the other tensor's corresponding dimension. Use
+`XNN_FLAG_NO_BROADCAST` only when all dimensions of both inputs are already equal.
+
+#### `struct xnn_binary_params`
+
+```c
+struct xnn_binary_params {
+  double output_min;  // lower bound for clipping output
+  double output_max;  // upper bound for clipping output
+};
+```
+
+#### Usage Example
+
+```c
+// Element-wise add with no clamping
+enum xnn_status status = xnn_define_binary(
+  subgraph,
+  xnn_binary_add,
+  /*params=*/ NULL,
+  input1_id,
+  input2_id,
+  output_id,
+  /*flags=*/ 0);
+
+// Element-wise multiply with output clamped to [0, 1]
+struct xnn_binary_params params = { .output_min = 0.0, .output_max = 1.0 };
+status = xnn_define_binary(
+  subgraph,
+  xnn_binary_multiply,
+  &params,
+  input1_id,
+  input2_id,
+  output_id,
+  /*flags=*/ 0);
+```
+
+---
+
+## Legacy Per-Operation Functions
+
+The functions below are **deprecated** wrappers around `xnn_define_unary` or `xnn_define_binary`.
+They remain in the header for backward compatibility but should not be used in new code.
+
+<Warning>
+  All functions in this section are marked `XNN_DEPRECATED`. Migrate to `xnn_define_unary` or
+  `xnn_define_binary` for new development.
+</Warning>
+
+### Unary Operations
+
+Each of these functions takes `(subgraph, input_id, output_id, flags)` unless noted:
+
+| Function | Equivalent to |
+|---|---|
+| `xnn_define_abs` | `xnn_define_unary(…, xnn_unary_abs, NULL, …)` |
+| `xnn_define_bankers_rounding` | `xnn_define_unary(…, xnn_unary_bankers_rounding, NULL, …)` |
+| `xnn_define_ceiling` | `xnn_define_unary(…, xnn_unary_ceiling, NULL, …)` |
+| `xnn_define_convert` | `xnn_define_unary(…, xnn_unary_convert, NULL, …)` |
+| `xnn_define_elu(subgraph, alpha, input_id, output_id, flags)` | `xnn_define_unary(…, xnn_unary_elu, &params, …)` |
+| `xnn_define_exp` | `xnn_define_unary(…, xnn_unary_exp, NULL, …)` |
+| `xnn_define_floor` | `xnn_define_unary(…, xnn_unary_floor, NULL, …)` |
+| `xnn_define_gelu` | `xnn_define_unary(…, xnn_unary_gelu, NULL, …)` |
+| `xnn_define_hardswish` | `xnn_define_unary(…, xnn_unary_hardswish, NULL, …)` |
+| `xnn_define_leaky_relu(subgraph, negative_slope, input_id, output_id, flags)` | `xnn_define_unary(…, xnn_unary_leaky_relu, &params, …)` |
+| `xnn_define_log` | `xnn_define_unary(…, xnn_unary_log, NULL, …)` |
+| `xnn_define_negate` | `xnn_define_unary(…, xnn_unary_negate, NULL, …)` |
+| `xnn_define_sigmoid` | `xnn_define_unary(…, xnn_unary_sigmoid, NULL, …)` |
+| `xnn_define_square` | `xnn_define_unary(…, xnn_unary_square, NULL, …)` |
+| `xnn_define_square_root` | `xnn_define_unary(…, xnn_unary_square_root, NULL, …)` |
+| `xnn_define_reciprocal_square_root` | `xnn_define_unary(…, xnn_unary_reciprocal_square_root, NULL, …)` |
+| `xnn_define_tanh` | `xnn_define_unary(…, xnn_unary_tanh, NULL, …)` |
+
+The `xnn_define_clamp(subgraph, output_min, output_max, input_id, output_id, flags)` function maps to
+`xnn_define_unary` with `xnn_unary_clamp` and `params.clamp.{min, max}`.
+
+### Non-activations
+
+| Function | Notes |
+|---|---|
+| `xnn_define_copy(subgraph, input_id, output_id, flags)` | Copies input tensor to output tensor. Output must match input shape. Not deprecated. |
+| `xnn_define_prelu(subgraph, input_id, slope_id, output_id, flags)` | PReLU: slope tensor must be `[1]` or `[channels]`. Deprecated; use `xnn_define_binary` with `xnn_binary_prelu`. |
+| `xnn_define_softmax(subgraph, input_id, output_id, flags)` | Softmax over the innermost dimension. Not deprecated. |
+| `xnn_define_static_transpose(subgraph, num_dims, perm, input_id, output_id, flags)` | Generalized transpose. `perm` is a permutation of `0…N-1`. Not deprecated. |
+
+### Binary Operations
+
+These legacy binary functions take `(subgraph, [output_min, output_max,] input1_id, input2_id, output_id, flags)`:
+
+| Function | Notes |
+|---|---|
+| `xnn_define_add2` | Addition with `output_min`/`output_max` clamping |
+| `xnn_define_subtract` | Subtraction with `output_min`/`output_max` clamping |
+| `xnn_define_multiply2` | Multiplication; no `output_min`/`output_max` in signature |
+| `xnn_define_divide` | Division with `output_min`/`output_max` clamping |
+| `xnn_define_maximum2` | Element-wise maximum; no clamping params |
+| `xnn_define_minimum2` | Element-wise minimum; no clamping params |
+| `xnn_define_squared_difference` | `(x1-x2)²`; no clamping params |
+
+---
+
+## Return Values
+
+| Status | Meaning |
+|--------|---------|
+| `xnn_status_success` | Node was successfully added to the subgraph. |
+| `xnn_status_invalid_parameter` | A parameter is inconsistent or out of range. |
+| `xnn_status_uninitialized` | `xnn_initialize()` was not called. |
+| `xnn_status_out_of_memory` | Memory allocation failed. |
+| `xnn_status_unsupported_parameter` | The data type or operator combination is not supported. |

@@ -1,0 +1,557 @@
+---
+title: "Convolution Operator API"
+description: "Reference documentation for xnn_define_convolution_2d, xnn_define_depthwise_convolution_2d, and xnn_define_deconvolution_2d subgraph node functions."
+---
+
+# Convolution Operators
+
+XNNPACK exposes three convolution variants through the Subgraph API. Each adds a Node to a
+`xnn_subgraph_t` that is later compiled into a `xnn_runtime_t` and invoked.
+
+All functions return `xnn_status_success` on success, or a non-zero `xnn_status` code on failure.
+
+---
+
+## `xnn_define_convolution_2d`
+
+Define a 2D Convolution Node and add it to a Subgraph.
+
+Performs standard 2-D cross-correlation of a 4-D input with a 4-D weight tensor, optionally
+adding a 1-D bias and applying an elementwise clamp to the output.
+
+```c
+enum xnn_status xnn_define_convolution_2d(
+  xnn_subgraph_t subgraph,
+  uint32_t input_padding_top,
+  uint32_t input_padding_right,
+  uint32_t input_padding_bottom,
+  uint32_t input_padding_left,
+  uint32_t kernel_height,
+  uint32_t kernel_width,
+  uint32_t subsampling_height,
+  uint32_t subsampling_width,
+  uint32_t dilation_height,
+  uint32_t dilation_width,
+  uint32_t groups,
+  size_t group_input_channels,
+  size_t group_output_channels,
+  float output_min,
+  float output_max,
+  uint32_t input_id,
+  uint32_t filter_id,
+  uint32_t bias_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+### Parameters
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph object that will own the created Node.
+</ParamField>
+
+<ParamField path="input_padding_top" type="uint32_t" required>
+  Implicit zero-padding above 2D input data. Must be `0` if
+  `XNN_FLAG_TENSORFLOW_SAME_PADDING` is specified.
+</ParamField>
+
+<ParamField path="input_padding_right" type="uint32_t" required>
+  Implicit zero-padding to the right of 2D input data. Must be `0` if
+  `XNN_FLAG_TENSORFLOW_SAME_PADDING` is specified.
+</ParamField>
+
+<ParamField path="input_padding_bottom" type="uint32_t" required>
+  Implicit zero-padding below 2D input data. Must be `0` if
+  `XNN_FLAG_TENSORFLOW_SAME_PADDING` is specified.
+</ParamField>
+
+<ParamField path="input_padding_left" type="uint32_t" required>
+  Implicit zero-padding to the left of 2D input data. Must be `0` if
+  `XNN_FLAG_TENSORFLOW_SAME_PADDING` is specified.
+</ParamField>
+
+<ParamField path="kernel_height" type="uint32_t" required>
+  Filter (kernel) height.
+</ParamField>
+
+<ParamField path="kernel_width" type="uint32_t" required>
+  Filter (kernel) width.
+</ParamField>
+
+<ParamField path="subsampling_height" type="uint32_t" required>
+  Height of the subsampling (stride) region for the convolution output — the convolution height stride.
+</ParamField>
+
+<ParamField path="subsampling_width" type="uint32_t" required>
+  Width of the subsampling (stride) region for the convolution output — the convolution width stride.
+</ParamField>
+
+<ParamField path="dilation_height" type="uint32_t" required>
+  Dilation factor for kernel elements along the height dimension. A value of `1` means no dilation (standard convolution).
+</ParamField>
+
+<ParamField path="dilation_width" type="uint32_t" required>
+  Dilation factor for kernel elements along the width dimension. A value of `1` means no dilation.
+</ParamField>
+
+<ParamField path="groups" type="uint32_t" required>
+  Number of convolution groups. For a standard convolution, set to `1`. Grouped convolutions split
+  channels into independent groups.
+</ParamField>
+
+<ParamField path="group_input_channels" type="size_t" required>
+  Number of input channels per group. Total input channels = `groups * group_input_channels`.
+</ParamField>
+
+<ParamField path="group_output_channels" type="size_t" required>
+  Number of output channels per group. Total output channels = `groups * group_output_channels`.
+</ParamField>
+
+<ParamField path="output_min" type="float" required>
+  Lower bound for clamping output values. Use `-INFINITY` to disable lower clamping.
+</ParamField>
+
+<ParamField path="output_max" type="float" required>
+  Upper bound for clamping output values. Use `+INFINITY` to disable upper clamping. A common
+  pattern is `0.0f` / `6.0f` for fused ReLU6.
+</ParamField>
+
+<ParamField path="input_id" type="uint32_t" required>
+  Value ID for the input tensor. Must be a 4D tensor of shape
+  `[N, IH, IW, groups * group_input_channels]`.
+</ParamField>
+
+<ParamField path="filter_id" type="uint32_t" required>
+  Value ID for the filter tensor. Must be a 4D tensor of shape
+  `[groups * group_output_channels, kernel_height, kernel_width, group_input_channels]`.
+</ParamField>
+
+<ParamField path="bias_id" type="uint32_t" required>
+  Value ID for the bias tensor, or `XNN_INVALID_VALUE_ID` for a bias-free convolution. If present,
+  must be a 1D tensor of shape `[groups * group_output_channels]`.
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID for the output tensor. Must be a 4D tensor of shape
+  `[N, OH, OW, groups * group_output_channels]`.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Bitfield of behavioral flags. See [Flags](#flags) section below.
+</ParamField>
+
+### Flags
+
+| Flag | Value | Description |
+|------|-------|-------------|
+| `XNN_FLAG_TENSORFLOW_SAME_PADDING` | `0x00000004` | Use TensorFlow "SAME" padding. Exact pad values are computed at runtime from input size. Mutually exclusive with explicit padding. |
+| `XNN_FLAG_INPUT_NHWC` | `0x00000002` | The operator assumes NHWC layout for the input regardless of output layout. |
+| `XNN_FLAG_FP32_STATIC_WEIGHTS` | `0x00000008` | Static weights of an FP16 operator are stored in FP32 format. |
+| `XNN_FLAG_FP32_STATIC_BIASES` | `0x00000080` | Static biases of an FP16 operator are stored in FP32 format. |
+
+### Output Shape
+
+```
+OH = floor((IH + padding_top + padding_bottom - dilation_height * (kernel_height - 1) - 1) / subsampling_height) + 1
+OW = floor((IW + padding_left + padding_right - dilation_width  * (kernel_width  - 1) - 1) / subsampling_width ) + 1
+```
+
+When `XNN_FLAG_TENSORFLOW_SAME_PADDING` is used, `OH = ceil(IH / subsampling_height)` and
+`OW = ceil(IW / subsampling_width)`.
+
+### Output Clamping
+
+After the convolution (and optional bias addition), every element `y` in the output tensor is
+transformed as:
+
+```
+y = clamp(y, output_min, output_max)
+```
+
+This lets you fuse activation functions like ReLU (`output_min=0`, `output_max=+∞`) or ReLU6
+(`output_min=0`, `output_max=6`) at no extra cost.
+
+### Usage Example
+
+```c
+#include <xnnpack.h>
+#include <math.h>  // INFINITY
+
+// Assume subgraph, input_id, filter_id, bias_id, output_id are already defined.
+enum xnn_status status = xnn_define_convolution_2d(
+  subgraph,
+  /*input_padding_top=*/   1,
+  /*input_padding_right=*/ 1,
+  /*input_padding_bottom=*/1,
+  /*input_padding_left=*/  1,
+  /*kernel_height=*/       3,
+  /*kernel_width=*/        3,
+  /*subsampling_height=*/  1,
+  /*subsampling_width=*/   1,
+  /*dilation_height=*/     1,
+  /*dilation_width=*/      1,
+  /*groups=*/              1,
+  /*group_input_channels=*/32,
+  /*group_output_channels=*/64,
+  /*output_min=*/          0.0f,   // ReLU lower bound
+  /*output_max=*/          INFINITY,
+  input_id,
+  filter_id,
+  bias_id,
+  output_id,
+  /*flags=*/               0);
+if (status != xnn_status_success) { /* handle error */ }
+```
+
+---
+
+## `xnn_define_depthwise_convolution_2d`
+
+Define a 2D Depthwise Convolution Node and add it to a Subgraph.
+
+Applies a single filter per input channel (depthwise separable step), optionally multiplied by
+`depth_multiplier` to produce more output channels than input channels.
+
+```c
+enum xnn_status xnn_define_depthwise_convolution_2d(
+  xnn_subgraph_t subgraph,
+  uint32_t input_padding_top,
+  uint32_t input_padding_right,
+  uint32_t input_padding_bottom,
+  uint32_t input_padding_left,
+  uint32_t kernel_height,
+  uint32_t kernel_width,
+  uint32_t subsampling_height,
+  uint32_t subsampling_width,
+  uint32_t dilation_height,
+  uint32_t dilation_width,
+  uint32_t depth_multiplier,
+  size_t input_channels,
+  float output_min,
+  float output_max,
+  uint32_t input_id,
+  uint32_t filter_id,
+  uint32_t bias_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+### Parameters
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph object that will own the created Node.
+</ParamField>
+
+<ParamField path="input_padding_top" type="uint32_t" required>
+  Implicit zero-padding above 2D input data. Must be `0` if `XNN_FLAG_TENSORFLOW_SAME_PADDING` is specified.
+</ParamField>
+
+<ParamField path="input_padding_right" type="uint32_t" required>
+  Implicit zero-padding to the right of 2D input data. Must be `0` if `XNN_FLAG_TENSORFLOW_SAME_PADDING` is specified.
+</ParamField>
+
+<ParamField path="input_padding_bottom" type="uint32_t" required>
+  Implicit zero-padding below 2D input data. Must be `0` if `XNN_FLAG_TENSORFLOW_SAME_PADDING` is specified.
+</ParamField>
+
+<ParamField path="input_padding_left" type="uint32_t" required>
+  Implicit zero-padding to the left of 2D input data. Must be `0` if `XNN_FLAG_TENSORFLOW_SAME_PADDING` is specified.
+</ParamField>
+
+<ParamField path="kernel_height" type="uint32_t" required>
+  Filter (kernel) height.
+</ParamField>
+
+<ParamField path="kernel_width" type="uint32_t" required>
+  Filter (kernel) width.
+</ParamField>
+
+<ParamField path="subsampling_height" type="uint32_t" required>
+  Convolution height stride.
+</ParamField>
+
+<ParamField path="subsampling_width" type="uint32_t" required>
+  Convolution width stride.
+</ParamField>
+
+<ParamField path="dilation_height" type="uint32_t" required>
+  Dilation of kernel elements along the height dimension.
+</ParamField>
+
+<ParamField path="dilation_width" type="uint32_t" required>
+  Dilation of kernel elements along the width dimension.
+</ParamField>
+
+<ParamField path="depth_multiplier" type="uint32_t" required>
+  Ratio of output channels to input channels. Setting this to `1` produces a standard depthwise
+  convolution. Values greater than `1` expand the channel count.
+</ParamField>
+
+<ParamField path="input_channels" type="size_t" required>
+  Number of input channels.
+</ParamField>
+
+<ParamField path="output_min" type="float" required>
+  Lower bound for clamping output values.
+</ParamField>
+
+<ParamField path="output_max" type="float" required>
+  Upper bound for clamping output values.
+</ParamField>
+
+<ParamField path="input_id" type="uint32_t" required>
+  Value ID for the input tensor. Must be a 4D tensor of shape `[N, IH, IW, input_channels]`.
+</ParamField>
+
+<ParamField path="filter_id" type="uint32_t" required>
+  Value ID for the filter tensor. Must be a 4D tensor of shape
+  `[1, kernel_height, kernel_width, input_channels * depth_multiplier]`.
+
+  <Note>
+    The per-channel quantization `channel_dim` for depthwise convolution filters is the **last** dimension
+    (unlike standard convolution where it is the first).
+  </Note>
+</ParamField>
+
+<ParamField path="bias_id" type="uint32_t" required>
+  Value ID for the bias tensor, or `XNN_INVALID_VALUE_ID`. If present, must be a 1D tensor of
+  shape `[input_channels * depth_multiplier]`.
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID for the output tensor. Must be a 4D tensor of shape
+  `[N, OH, OW, input_channels * depth_multiplier]`.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Bitfield of behavioral flags. `XNN_FLAG_TENSORFLOW_SAME_PADDING` is supported.
+</ParamField>
+
+### Flags
+
+| Flag | Value | Description |
+|------|-------|-------------|
+| `XNN_FLAG_TENSORFLOW_SAME_PADDING` | `0x00000004` | Use TensorFlow "SAME" padding computed at runtime. |
+| `XNN_FLAG_DEPTHWISE_CONVOLUTION` | `0x00000001` | Marks this node as depthwise; uses HWGo (height × width × groups × output) filter layout. |
+
+### Usage Example
+
+```c
+// Depthwise 3×3 conv, stride 2, depth_multiplier=1 (standard depthwise)
+enum xnn_status status = xnn_define_depthwise_convolution_2d(
+  subgraph,
+  /*input_padding_top=*/   0,
+  /*input_padding_right=*/ 0,
+  /*input_padding_bottom=*/0,
+  /*input_padding_left=*/  0,
+  /*kernel_height=*/       3,
+  /*kernel_width=*/        3,
+  /*subsampling_height=*/  2,
+  /*subsampling_width=*/   2,
+  /*dilation_height=*/     1,
+  /*dilation_width=*/      1,
+  /*depth_multiplier=*/    1,
+  /*input_channels=*/      64,
+  /*output_min=*/          0.0f,
+  /*output_max=*/          6.0f,   // ReLU6
+  input_id,
+  filter_id,
+  bias_id,
+  output_id,
+  /*flags=*/               XNN_FLAG_TENSORFLOW_SAME_PADDING);
+```
+
+---
+
+## `xnn_define_deconvolution_2d`
+
+Define a 2D Deconvolution (Transposed Convolution) Node and add it to a Subgraph.
+
+Computes the gradient of a convolution with respect to its input, effectively upsampling the
+spatial resolution by `upsampling_height × upsampling_width`.
+
+```c
+enum xnn_status xnn_define_deconvolution_2d(
+  xnn_subgraph_t subgraph,
+  uint32_t padding_top,
+  uint32_t padding_right,
+  uint32_t padding_bottom,
+  uint32_t padding_left,
+  uint32_t adjustment_height,
+  uint32_t adjustment_width,
+  uint32_t kernel_height,
+  uint32_t kernel_width,
+  uint32_t upsampling_height,
+  uint32_t upsampling_width,
+  uint32_t dilation_height,
+  uint32_t dilation_width,
+  uint32_t groups,
+  size_t group_input_channels,
+  size_t group_output_channels,
+  float output_min,
+  float output_max,
+  uint32_t input_id,
+  uint32_t filter_id,
+  uint32_t bias_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+### Parameters
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph object that will own the created Node.
+</ParamField>
+
+<ParamField path="padding_top" type="uint32_t" required>
+  Implicit padding cropped from the top of the 2D output.
+</ParamField>
+
+<ParamField path="padding_right" type="uint32_t" required>
+  Implicit padding cropped from the right of the 2D output.
+</ParamField>
+
+<ParamField path="padding_bottom" type="uint32_t" required>
+  Implicit padding cropped from the bottom of the 2D output.
+</ParamField>
+
+<ParamField path="padding_left" type="uint32_t" required>
+  Implicit padding cropped from the left of the 2D output.
+</ParamField>
+
+<ParamField path="adjustment_height" type="uint32_t" required>
+  Additional elements appended at the bottom of the 2D output data. Used to disambiguate output
+  size when `upsampling_height > 1`.
+</ParamField>
+
+<ParamField path="adjustment_width" type="uint32_t" required>
+  Additional elements appended to the right of the 2D output data.
+</ParamField>
+
+<ParamField path="kernel_height" type="uint32_t" required>
+  Filter (kernel) height.
+</ParamField>
+
+<ParamField path="kernel_width" type="uint32_t" required>
+  Filter (kernel) width.
+</ParamField>
+
+<ParamField path="upsampling_height" type="uint32_t" required>
+  Height of the upsampling region for the deconvolution input — equivalent to the stride of the
+  corresponding forward convolution.
+</ParamField>
+
+<ParamField path="upsampling_width" type="uint32_t" required>
+  Width of the upsampling region for the deconvolution input.
+</ParamField>
+
+<ParamField path="dilation_height" type="uint32_t" required>
+  Dilation of kernel elements along the height dimension.
+</ParamField>
+
+<ParamField path="dilation_width" type="uint32_t" required>
+  Dilation of kernel elements along the width dimension.
+</ParamField>
+
+<ParamField path="groups" type="uint32_t" required>
+  Number of convolution groups.
+</ParamField>
+
+<ParamField path="group_input_channels" type="size_t" required>
+  Number of input channels per group.
+</ParamField>
+
+<ParamField path="group_output_channels" type="size_t" required>
+  Number of output channels per group.
+</ParamField>
+
+<ParamField path="output_min" type="float" required>
+  Lower bound for clamping output values.
+</ParamField>
+
+<ParamField path="output_max" type="float" required>
+  Upper bound for clamping output values.
+</ParamField>
+
+<ParamField path="input_id" type="uint32_t" required>
+  Value ID for the input tensor. Must be a 4D tensor of shape
+  `[N, IH, IW, groups * group_input_channels]`.
+</ParamField>
+
+<ParamField path="filter_id" type="uint32_t" required>
+  Value ID for the filter tensor. Must be a 4D tensor of shape
+  `[groups * group_output_channels, kernel_height, kernel_width, group_input_channels]`.
+</ParamField>
+
+<ParamField path="bias_id" type="uint32_t" required>
+  Value ID for the bias tensor, or `XNN_INVALID_VALUE_ID`. If present, must be a 1D tensor of
+  shape `[groups * group_output_channels]`.
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID for the output tensor. Must be a 4D tensor of shape
+  `[N, OH, OW, groups * group_output_channels]`.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Bitfield of behavioral flags. No flags are currently defined; pass `0`.
+</ParamField>
+
+### Output Shape
+
+```
+OH = (IH - 1) * upsampling_height - padding_top - padding_bottom
+   + dilation_height * (kernel_height - 1) + adjustment_height + 1
+
+OW = (IW - 1) * upsampling_width  - padding_left - padding_right
+   + dilation_width  * (kernel_width  - 1) + adjustment_width  + 1
+```
+
+<Warning>
+  Padding parameters for deconvolution describe how much of the full output to **crop**, not how
+  much to add. This is the inverse of the convention used by `xnn_define_convolution_2d`.
+</Warning>
+
+### Usage Example
+
+```c
+// 2× bilinear-like upsampling via 4×4 transposed conv, stride 2
+enum xnn_status status = xnn_define_deconvolution_2d(
+  subgraph,
+  /*padding_top=*/       1,
+  /*padding_right=*/     1,
+  /*padding_bottom=*/    1,
+  /*padding_left=*/      1,
+  /*adjustment_height=*/ 0,
+  /*adjustment_width=*/  0,
+  /*kernel_height=*/     4,
+  /*kernel_width=*/      4,
+  /*upsampling_height=*/ 2,
+  /*upsampling_width=*/  2,
+  /*dilation_height=*/   1,
+  /*dilation_width=*/    1,
+  /*groups=*/            1,
+  /*group_input_channels=*/  128,
+  /*group_output_channels=*/ 64,
+  /*output_min=*/  -INFINITY,
+  /*output_max=*/  +INFINITY,
+  input_id,
+  filter_id,
+  bias_id,
+  output_id,
+  /*flags=*/ 0);
+```
+
+---
+
+## Return Values
+
+All three functions return an `enum xnn_status`:
+
+| Status | Meaning |
+|--------|---------|
+| `xnn_status_success` | Node was successfully added to the subgraph. |
+| `xnn_status_invalid_parameter` | A parameter (e.g., tensor shape, padding) is inconsistent or out of range. |
+| `xnn_status_uninitialized` | `xnn_initialize()` was not called before use. |
+| `xnn_status_out_of_memory` | Memory allocation failed. |
+| `xnn_status_unsupported_parameter` | The combination of data types or flags is not supported on this build. |

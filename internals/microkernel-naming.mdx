@@ -1,0 +1,251 @@
+---
+title: "Microkernel Naming Conventions"
+description: "A complete guide to decoding XNNPACK microkernel function names, including datatype codes, microkernel types, activation suffixes, architecture codes, and per-family parameter conventions."
+---
+
+Every XNNPACK microkernel follows a structured naming convention that encodes all the information needed to understand what the kernel does, which data types it operates on, and which hardware it targets. Once you know the pattern, any kernel name becomes self-documenting.
+
+## General pattern
+
+```text
+xnn_<datatype>_<microkernel>[_<activation>]_ukernel_<parameters>__<arch>[_u<unroll>]
+```
+
+The double underscore (`__`) separates the logical description from the hardware target. Everything before `__` describes _what_ the kernel computes; everything after describes _where_ it runs.
+
+## Datatype codes
+
+| Code | Meaning |
+|---|---|
+| `f16` | 16-bit half-precision float (IEEE 754) |
+| `f32` | 32-bit single-precision float |
+| `qc8` | Quantized 8-bit with per-channel scale |
+| `qs8` | Quantized signed 8-bit integer |
+| `qu8` | Quantized unsigned 8-bit integer |
+| `s16` | Signed 16-bit integer |
+| `u32` | Unsigned 32-bit integer |
+| `x8` | Opaque 8-bit (type-agnostic copy/pack operations) |
+| `x16` | Opaque 16-bit |
+| `x24` | Opaque 24-bit (e.g., RGB) |
+| `x32` | Opaque 32-bit |
+| `xx` | Mixed or type-agnostic (e.g., transpose) |
+
+## Microkernel types
+
+The `<microkernel>` token identifies the operation family:
+
+| Token | Operation |
+|---|---|
+| `gemm` | General matrix multiplication (direct A × B) |
+| `igemm` | Indirect GEMM (A is accessed through a pointer array) |
+| `dwconv` | Depthwise convolution |
+| `avgpool` | Average pooling |
+| `gavgpool` | Global average pooling |
+| `maxpool` | Max pooling |
+| `vmul`, `vadd`, `vmin`, … | Binary elementwise operations |
+| `vtanh`, `vsigmoid`, `vsqrt`, … | Unary elementwise operations |
+| `rsum`, `rmax` | Reduction operations |
+| `spmm` | Sparse matrix × dense matrix |
+| `lut` | Lookup-table (quantization) |
+
+## Activation suffixes
+
+Fused activations are appended directly after the microkernel type, before `_ukernel`:
+
+| Suffix | Activation |
+|---|---|
+| _(none)_ | No activation (linear pass-through) |
+| `_linear` | Explicit linear (identity) activation |
+| `_minmax` | Clamp output to `[min, max]` |
+| `_relu` | ReLU (clamp to `[0, +∞)`) |
+
+<Note>
+The `_minmax` suffix is the most common. Min and max values are passed via a `params` struct and can be set to `[-∞, +∞]` to effectively disable clamping at runtime without switching to a different kernel.
+</Note>
+
+## Architecture codes
+
+The `<arch>` suffix after `__` specifies the target ISA and optional micro-architecture tuning:
+
+| Code | Target |
+|---|---|
+| `scalar` | Portable C, no SIMD |
+| `neon` | ARM Advanced SIMD (NEON) |
+| `neonfma` | ARM NEON with fused multiply-add |
+| `neonv8_mlal` | ARMv8 NEON with `SMLAL` for 8-bit multiply-accumulate |
+| `aarch32_neon_cortex_a55` | Hand-tuned aarch32 assembly for Cortex-A55 |
+| `aarch64_neon_cortex_a55` | Hand-tuned aarch64 assembly for Cortex-A55 |
+| `sse` / `sse2` / `sse41` | x86 SSE variants |
+| `avx` | x86 AVX (256-bit) |
+| `fma3` | x86 AVX + FMA3 |
+| `avx512f` | x86 AVX-512 Foundation |
+| `avx512skx` | AVX-512 with Skylake-X extensions (VNNI, BF16) |
+| `wasm` | WebAssembly (scalar) |
+| `wasmsimd` | WebAssembly SIMD (128-bit) |
+| `wasmrelaxedsimd` | WebAssembly Relaxed SIMD |
+| `hvx` | Qualcomm Hexagon HVX (1024-bit) |
+| `rvv` | RISC-V Vector extension |
+
+## Unroll factor
+
+The optional `_u<N>` suffix at the very end of the name records the **unroll factor** — how many elements the innermost loop processes per iteration. For example, `_u4` means 4 elements per iteration.
+
+Higher unroll factors reduce loop overhead and improve instruction-level parallelism, at the cost of increased code size.
+
+---
+
+## Per-family parameter conventions
+
+### GEMM and IGEMM
+
+```text
+xnn_f32_gemm_minmax_ukernel_<MR>x<NR>__<arch>
+```
+
+- `MR` — number of rows of A processed per call (must be ≤ the tile size)
+- `NR` — number of columns of B processed per inner-loop iteration
+
+**Example:** `xnn_f32_gemm_minmax_ukernel_2x4__scalar`
+
+```c
+void xnn_f32_gemm_minmax_ukernel_2x4__scalar(
+    size_t mr,         // actual rows (≤ MR=2)
+    size_t nc,         // actual columns of B
+    size_t kc,         // reduction dimension in bytes
+    const float* restrict a,
+    size_t a_stride,
+    const float* restrict w,
+    float* restrict c,
+    size_t cm_stride,
+    size_t cn_stride,
+    const struct xnn_f32_minmax_params* restrict params)
+```
+
+Conceptually, the inner loop looks like:
+
+```c
+for (int n = 0; n < nc; n += NR) {       // NR=4 columns at a time
+    for (int k = 0; k < KC; k += 1) {
+        // 1. Load MR=2 activations: A[0,k] … A[MR-1,k]
+        // 2. Load NR=4 weights:     B[k,n] … B[k,n+NR-1]
+        // 3. Compute MR×NR products
+        // 4. Accumulate into C[0,n] … C[MR-1,n+NR-1]
+    }
+}
+```
+
+IGEMM is identical in signature but the `a` argument is replaced by an array of pointers, enabling the [Indirect Convolution Algorithm](https://arxiv.org/abs/1907.02129).
+
+---
+
+### DWCONV (depthwise convolution)
+
+DWCONV microkernels come in two structural varieties:
+
+#### Uni-pass
+
+```text
+xnn_f32_dwconv_minmax_ukernel_<K>p<C>c__<arch>
+```
+
+| Token | Meaning |
+|---|---|
+| `K` | Kernel tile — number of kernel elements read per output |
+| `p` | Separator (stands for "primary") |
+| `C` | Channel tile — channels processed per main-loop iteration |
+| `c` | Suffix marker for channel |
+
+**Example:** `xnn_f32_dwconv_minmax_ukernel_9p4c__neonfma`
+→ Kernel tile = 9, channel tile = 4, ARM NEON with FMA.
+
+#### Multi-pass
+
+```text
+xnn_f32_dwconv_minmax_ukernel_<U>f<V>m<W>l<X>c<Y>s<Z>r__<arch>
+```
+
+| Token | Meaning |
+|---|---|
+| `U` + `f` | First pass tile size |
+| `V` + `m` | Middle pass tile size (runs as many times as needed) |
+| `W` + `l` | Last pass tile size (at least 1 iteration) |
+| `X` + `c` | Channel tile |
+| `Y` + `s` | Channel subtile |
+| `Z` + `r` | Channel round (rounding for OOB-safe reads) |
+
+The kernel size must be at least `W + 1`. The middle pass repeats until only `W` or fewer elements remain, which the last pass then handles.
+
+<Tip>
+`Z` (channel round) relates to `XNN_EXTRA_BYTES`. XNNPACK is allowed to read up to `XNN_EXTRA_BYTES` (16 bytes on most platforms, 128 on Hexagon) past the end of an array, so `Z` is chosen such that rounding channels up to the next multiple of `Z` never reads beyond the allocated buffer.
+</Tip>
+
+---
+
+### Average pooling
+
+#### Uni-pass
+
+```text
+xnn_f32_avgpool_minmax_ukernel_<C>x__<arch>_c<T>
+```
+
+- `C` — maximum number of pooling elements this kernel can handle
+- `T` — channel tile
+
+**Example:** `xnn_f32_avgpool_minmax_ukernel_9x__neon_c4`
+→ Handles up to 9 pooling elements, 4-channel tile, NEON.
+
+#### Multi-pass
+
+```text
+xnn_f32_avgpool_minmax_ukernel_<C>p<D>x__<arch>_c<T>
+```
+
+- `C` — elements handled in the last pass (also the maximum for the first pass)
+- `D` — elements handled in the middle/incremental pass
+- `T` — channel tile
+
+---
+
+## Decoding examples
+
+<AccordionGroup>
+  <Accordion title="xnn_f32_gemm_minmax_ukernel_4x8__neonfma">
+    | Part | Value |
+    |---|---|
+    | Datatype | `f32` — single-precision float |
+    | Microkernel | `gemm` — matrix multiply |
+    | Activation | `minmax` — output clamped to [min, max] |
+    | MR × NR | `4x8` — 4 output rows, 8 columns per tile |
+    | Architecture | `neonfma` — ARM NEON with fused multiply-add |
+  </Accordion>
+  <Accordion title="xnn_qs8_igemm_minmax_rndnu_ukernel_4x16__aarch64_neon_cortex_a55">
+    | Part | Value |
+    |---|---|
+    | Datatype | `qs8` — quantized signed 8-bit |
+    | Microkernel | `igemm` — indirect GEMM |
+    | Activation | `minmax_rndnu` — minmax with rounding mode |
+    | MR × NR | `4x16` — 4 output rows, 16 columns |
+    | Architecture | `aarch64_neon_cortex_a55` — hand-tuned aarch64 assembly for Cortex-A55 |
+  </Accordion>
+  <Accordion title="xnn_f32_dwconv_minmax_ukernel_9p8c__avx">
+    | Part | Value |
+    |---|---|
+    | Datatype | `f32` — single-precision float |
+    | Microkernel | `dwconv` — depthwise convolution, uni-pass |
+    | Activation | `minmax` — clamped output |
+    | Kernel tile | `9` |
+    | Channel tile | `8c` — 8 channels (matches AVX 256-bit / 8× f32) |
+    | Architecture | `avx` — x86 AVX |
+  </Accordion>
+  <Accordion title="xnn_f32_avgpool_minmax_ukernel_9x__neon_c4">
+    | Part | Value |
+    |---|---|
+    | Datatype | `f32` — single-precision float |
+    | Microkernel | `avgpool` — average pooling, uni-pass |
+    | Activation | `minmax` — clamped output |
+    | Max elements | `9x` — up to 9 pooling inputs |
+    | Channel tile | `c4` — 4 channels per iteration |
+    | Architecture | `neon` — ARM NEON |
+  </Accordion>
+</AccordionGroup>

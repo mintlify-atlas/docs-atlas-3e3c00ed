@@ -1,0 +1,503 @@
+---
+title: "Tensors"
+description: "Define tensor Values in a Subgraph, covering floating-point tensors, per-tensor quantized tensors, per-channel quantized tensors, and dynamic quantization."
+---
+
+Tensors in XNNPACK are called **Values** and are defined within a Subgraph before any operator Nodes are added. Each Value is identified by a `uint32_t` ID returned through an `id_out` pointer. Values can be:
+
+- **Static** — initialized with a constant data pointer (e.g., model weights).
+- **External** — provided by the caller at inference time via `xnn_setup_runtime`.
+- **Internal** — allocated and managed entirely by XNNPACK.
+
+<Warning>
+  **`XNN_EXTRA_BYTES` requirement:** callers must allocate at least `XNN_EXTRA_BYTES` extra bytes _after_ every tensor data buffer passed to XNNPACK. XNNPACK may read up to `XNN_EXTRA_BYTES` bytes beyond the end of the declared tensor data. It never writes beyond array bounds.
+
+  ```c
+  // XNN_EXTRA_BYTES is 16 on most platforms, 128 on Hexagon.
+  float* data = malloc(num_elements * sizeof(float) + XNN_EXTRA_BYTES);
+  ```
+</Warning>
+
+---
+
+## Constants
+
+### `XNN_EXTRA_BYTES`
+
+```c
+#define XNN_EXTRA_BYTES 16   // 128 on Hexagon
+```
+
+Minimum number of extra bytes to allocate after any tensor data buffer passed to XNNPACK.
+
+### `XNN_EXTRA_QUANTIZATION_PARAMS`
+
+```c
+#define XNN_EXTRA_QUANTIZATION_PARAMS 15
+```
+
+Minimum number of extra `xnn_quantization_params` entries to allocate after any quantization parameter array passed to XNNPACK.
+
+### `XNN_MIN_BLOCKSIZE`
+
+```c
+#define XNN_MIN_BLOCKSIZE 32
+```
+
+Minimum block size for blockwise quantized operators. For a fully connected layer with filter shape `[output_channels, input_channels]`, the number of scale values must equal `output_channels * (input_channels / block_size)`.
+
+---
+
+## `enum xnn_datatype`
+
+```c
+enum xnn_datatype {
+  xnn_datatype_invalid = 0,
+  xnn_datatype_fp32    = 1,
+  xnn_datatype_fp16    = 2,
+  xnn_datatype_qint8   = 3,
+  xnn_datatype_quint8  = 4,
+  xnn_datatype_qint32  = 5,
+  xnn_datatype_qcint8  = 6,
+  xnn_datatype_qcint32 = 7,
+  xnn_datatype_qcint4  = 8,
+  xnn_datatype_qdint8  = 9,
+  xnn_datatype_qpint8  = 10,
+  xnn_datatype_int32   = 11,
+  xnn_datatype_qbint4  = 12,
+  xnn_datatype_pfp32   = 13,
+  xnn_datatype_bf16    = 14,
+  xnn_datatype_qduint8 = 15,
+  xnn_datatype_pfp16   = 16,
+  xnn_datatype_pqint8  = 17,
+  xnn_datatype_qcint2  = 18,
+};
+```
+
+| Value | Name | Description |
+|-------|------|-------------|
+| `0` | `xnn_datatype_invalid` | Invalid/unset data type. No valid Value has this type. |
+| `1` | `xnn_datatype_fp32` | IEEE 754 single-precision (32-bit) floating-point. |
+| `2` | `xnn_datatype_fp16` | IEEE 754 half-precision (16-bit) floating-point. |
+| `3` | `xnn_datatype_qint8` | 8-bit signed integer with per-tensor quantization parameters. |
+| `4` | `xnn_datatype_quint8` | 8-bit unsigned integer with per-tensor quantization parameters. |
+| `5` | `xnn_datatype_qint32` | 32-bit signed integer with per-tensor quantization parameters. |
+| `6` | `xnn_datatype_qcint8` | 8-bit signed integer with per-channel quantization parameters. |
+| `7` | `xnn_datatype_qcint32` | 32-bit signed integer with per-channel quantization parameters. |
+| `8` | `xnn_datatype_qcint4` | 4-bit signed integer with per-channel quantization parameters. |
+| `9` | `xnn_datatype_qdint8` | Dynamically quantized 8-bit signed integer with per-batch quantization parameters. |
+| `10` | `xnn_datatype_qpint8` | 8-bit signed integers packed together with their per-row quantization parameters. |
+| `11` | `xnn_datatype_int32` | 32-bit signed integers (no quantization). |
+| `12` | `xnn_datatype_qbint4` | 4-bit signed integer with per-channel-block (blockwise) quantization parameters. |
+| `13` | `xnn_datatype_pfp32` | IEEE 754 single-precision packed floating-point. |
+| `14` | `xnn_datatype_bf16` | BFloat16 — the upper 16 bits of a 32-bit float. |
+| `15` | `xnn_datatype_qduint8` | Dynamically quantized 8-bit unsigned integer with per-batch quantization parameters. |
+| `16` | `xnn_datatype_pfp16` | IEEE 754 half-precision packed floating-point. |
+| `17` | `xnn_datatype_pqint8` | Packed 8-bit unsigned integer with per-tensor quantization parameters. |
+| `18` | `xnn_datatype_qcint2` | 2-bit signed integer with per-channel quantization parameters, packed into 8-bit integers. |
+
+---
+
+## `struct xnn_quantization_params`
+
+```c
+struct xnn_quantization_params {
+  int32_t zero_point;
+  float   scale;
+};
+```
+
+Quantization parameters for a single tensor or a single channel.
+
+<ParamField path="zero_point" type="int32_t">
+  Integer offset subtracted from quantized values before scaling. For unsigned 8-bit (`quint8`), the typical range is `[0, 255]`. For signed 8-bit (`qint8`), the typical range is `[-128, 127]`.
+</ParamField>
+
+<ParamField path="scale" type="float">
+  Positive multiplier that converts quantized integer values to their real-valued representation: `real = (quantized - zero_point) * scale`.
+</ParamField>
+
+---
+
+## Functions
+
+### `xnn_define_tensor_value`
+
+```c
+enum xnn_status xnn_define_tensor_value(
+  xnn_subgraph_t subgraph,
+  enum xnn_datatype datatype,
+  size_t num_dims,
+  const size_t* dims,
+  const void* data,
+  uint32_t external_id,
+  uint32_t flags,
+  uint32_t* id_out);
+```
+
+Define a floating-point or integer tensor Value and add it to the Subgraph. Use this for `fp32`, `fp16`, `bf16`, `int32`, and other non-quantized types.
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph that will own this Value.
+</ParamField>
+
+<ParamField path="datatype" type="enum xnn_datatype" required>
+  Element type. Use `xnn_datatype_fp32` for standard single-precision inference.
+</ParamField>
+
+<ParamField path="num_dims" type="size_t" required>
+  Number of dimensions. Must be at most `XNN_MAX_TENSOR_DIMS` (6). Pass `0` for scalar tensors.
+</ParamField>
+
+<ParamField path="dims" type="const size_t*" required>
+  Array of `num_dims` dimension sizes. May be `NULL` only when `num_dims` is `0`. XNNPACK copies this array; the pointer need not remain valid after the call returns.
+</ParamField>
+
+<ParamField path="data" type="const void*">
+  Pointer to static initialization data (e.g., constant weights). Pass `NULL` for non-static tensors. If non-`NULL`, the pointed-to data must remain valid for the lifetime of the Subgraph **and** all Runtime objects created from it. The buffer must be at least `XNN_EXTRA_BYTES` larger than the tensor size.
+</ParamField>
+
+<ParamField path="external_id" type="uint32_t" required>
+  A pre-reserved external ID (in the range `[0, external_value_ids - 1]`), or `XNN_INVALID_VALUE_ID` to let XNNPACK assign an internal ID.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Combination of `XNN_VALUE_FLAG_EXTERNAL_INPUT` and/or `XNN_VALUE_FLAG_EXTERNAL_OUTPUT`, or `0` for purely internal Values.
+</ParamField>
+
+<ParamField path="id_out" type="uint32_t*" required>
+  Output: receives the assigned Value ID. If `external_id` was valid, this will equal `external_id`.
+</ParamField>
+
+**Return values**
+
+| Status | Meaning |
+|--------|---------|
+| `xnn_status_success` | Value defined. `*id_out` is valid. |
+| `xnn_status_invalid_parameter` | Invalid argument (e.g., `num_dims > XNN_MAX_TENSOR_DIMS`, invalid `external_id`, or `id_out` is `NULL`). |
+| `xnn_status_out_of_memory` | Memory allocation failed. |
+
+---
+
+### `xnn_define_quantized_tensor_value`
+
+```c
+enum xnn_status xnn_define_quantized_tensor_value(
+  xnn_subgraph_t subgraph,
+  enum xnn_datatype datatype,
+  int32_t zero_point,
+  float scale,
+  size_t num_dims,
+  const size_t* dims,
+  const void* data,
+  uint32_t external_id,
+  uint32_t flags,
+  uint32_t* id_out);
+```
+
+Define a per-tensor quantized Value. All elements in the tensor share a single `(zero_point, scale)` pair. Suitable for activations and biases using `qint8`, `quint8`, or `qint32`.
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph that will own this Value.
+</ParamField>
+
+<ParamField path="datatype" type="enum xnn_datatype" required>
+  Quantized element type. Typically `xnn_datatype_qint8`, `xnn_datatype_quint8`, or `xnn_datatype_qint32`.
+</ParamField>
+
+<ParamField path="zero_point" type="int32_t" required>
+  Quantization zero point shared across all elements.
+</ParamField>
+
+<ParamField path="scale" type="float" required>
+  Positive quantization scale shared across all elements.
+</ParamField>
+
+<ParamField path="num_dims" type="size_t" required>
+  Number of dimensions. Must not exceed `XNN_MAX_TENSOR_DIMS`.
+</ParamField>
+
+<ParamField path="dims" type="const size_t*" required>
+  Array of `num_dims` dimension sizes. May be `NULL` when `num_dims` is `0`.
+</ParamField>
+
+<ParamField path="data" type="const void*">
+  Static initialization data, or `NULL` for non-static tensors.
+</ParamField>
+
+<ParamField path="external_id" type="uint32_t" required>
+  Pre-reserved external ID or `XNN_INVALID_VALUE_ID`.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  `XNN_VALUE_FLAG_EXTERNAL_INPUT`, `XNN_VALUE_FLAG_EXTERNAL_OUTPUT`, or `0`.
+</ParamField>
+
+<ParamField path="id_out" type="uint32_t*" required>
+  Output: receives the assigned Value ID.
+</ParamField>
+
+---
+
+### `xnn_define_channelwise_quantized_tensor_value`
+
+```c
+enum xnn_status xnn_define_channelwise_quantized_tensor_value(
+  xnn_subgraph_t subgraph,
+  enum xnn_datatype datatype,
+  const float* scale,
+  size_t num_dims,
+  size_t channel_dim,
+  const size_t* dims,
+  const void* data,
+  uint32_t external_id,
+  uint32_t flags,
+  uint32_t* id_out);
+```
+
+Define a per-channel quantized Value. Each channel has its own `scale` value. Zero point is implicitly `0`. Suitable for weight tensors in convolution and fully connected operators.
+
+<ParamField path="subgraph" type="xnn_subgraph_t" required>
+  The Subgraph that will own this Value.
+</ParamField>
+
+<ParamField path="datatype" type="enum xnn_datatype" required>
+  Quantized element type. Typically `xnn_datatype_qcint8`, `xnn_datatype_qcint32`, or `xnn_datatype_qcint4`.
+</ParamField>
+
+<ParamField path="scale" type="const float*" required>
+  Array of per-channel scale factors. Must contain one value per channel along `channel_dim`. Must remain valid for the lifetime of the Subgraph and any derived Runtimes. The array must have at least `XNN_EXTRA_QUANTIZATION_PARAMS` extra entries allocated beyond the last channel.
+</ParamField>
+
+<ParamField path="num_dims" type="size_t" required>
+  Number of dimensions.
+</ParamField>
+
+<ParamField path="channel_dim" type="size_t" required>
+  Index of the channel dimension. For convolution and fully connected filter tensors this is typically `0` (output channels first). For depthwise convolution it is typically the last dimension.
+</ParamField>
+
+<ParamField path="dims" type="const size_t*" required>
+  Array of `num_dims` dimension sizes.
+</ParamField>
+
+<ParamField path="data" type="const void*">
+  Static weight data, or `NULL`.
+</ParamField>
+
+<ParamField path="external_id" type="uint32_t" required>
+  Pre-reserved external ID or `XNN_INVALID_VALUE_ID`.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Value flags, or `0`.
+</ParamField>
+
+<ParamField path="id_out" type="uint32_t*" required>
+  Output: receives the assigned Value ID.
+</ParamField>
+
+---
+
+### `xnn_define_channelwise_quantized_tensor_value_v2`
+
+```c
+enum xnn_status xnn_define_channelwise_quantized_tensor_value_v2(
+  xnn_subgraph_t subgraph,
+  enum xnn_datatype datatype,
+  int32_t zero_point,
+  const float* scale,
+  size_t num_dims,
+  size_t channel_dim,
+  const size_t* dims,
+  const void* data,
+  uint32_t external_id,
+  uint32_t flags,
+  uint32_t* id_out);
+```
+
+Like `xnn_define_channelwise_quantized_tensor_value`, but accepts an explicit shared `zero_point` that applies to all channels.
+
+<ParamField path="zero_point" type="int32_t" required>
+  Shared zero point for all channels.
+</ParamField>
+
+All other parameters are identical to `xnn_define_channelwise_quantized_tensor_value`.
+
+---
+
+### `xnn_define_channelwise_quantized_tensor_value_v3`
+
+```c
+enum xnn_status xnn_define_channelwise_quantized_tensor_value_v3(
+  xnn_subgraph_t subgraph,
+  enum xnn_datatype datatype,
+  int32_t zero_point,
+  const float* scale,
+  size_t num_dims,
+  size_t channel_dim,
+  const size_t* dims,
+  const void* data,
+  uint32_t external_id,
+  uint32_t flags,
+  uint32_t* id_out,
+  const float* channelwise_zero_point);
+```
+
+Extends `_v2` with a `channelwise_zero_point` array for per-channel zero points.
+
+<ParamField path="channelwise_zero_point" type="const float*">
+  Array of per-channel zero point values. May be `NULL` to use the shared `zero_point` for all channels.
+</ParamField>
+
+All other parameters are identical to `xnn_define_channelwise_quantized_tensor_value_v2`.
+
+---
+
+### `xnn_validate_quantized_tensor`
+
+```c
+enum xnn_status xnn_validate_quantized_tensor(
+  enum xnn_datatype datatype,
+  int32_t zero_point,
+  float scale,
+  size_t num_dims,
+  const size_t* dims);
+```
+
+Validate per-tensor quantization parameters without creating a Value. Useful for checking inputs before defining them in a Subgraph.
+
+<ParamField path="datatype" type="enum xnn_datatype" required>
+  Quantized element type.
+</ParamField>
+
+<ParamField path="zero_point" type="int32_t" required>
+  Zero point to validate against the data type's valid range.
+</ParamField>
+
+<ParamField path="scale" type="float" required>
+  Scale factor. Must be positive and finite.
+</ParamField>
+
+<ParamField path="num_dims" type="size_t" required>
+  Number of tensor dimensions.
+</ParamField>
+
+<ParamField path="dims" type="const size_t*" required>
+  Array of `num_dims` dimension sizes. May be `NULL` when `num_dims` is `0`.
+</ParamField>
+
+**Return values**
+
+| Status | Meaning |
+|--------|---------|
+| `xnn_status_success` | Parameters are valid. |
+| `xnn_status_invalid_parameter` | A parameter is out of range or incompatible with the data type. |
+
+---
+
+### `xnn_validate_channelwise_quantized_tensor`
+
+```c
+enum xnn_status xnn_validate_channelwise_quantized_tensor(
+  enum xnn_datatype datatype,
+  int32_t zero_point,
+  const float* scale,
+  size_t num_dims,
+  size_t channel_dim,
+  const size_t* dims);
+```
+
+Validate per-channel quantization parameters without creating a Value.
+
+<ParamField path="datatype" type="enum xnn_datatype" required>
+  Quantized element type.
+</ParamField>
+
+<ParamField path="zero_point" type="int32_t" required>
+  Shared zero point.
+</ParamField>
+
+<ParamField path="scale" type="const float*" required>
+  Array of per-channel scale values.
+</ParamField>
+
+<ParamField path="num_dims" type="size_t" required>
+  Number of tensor dimensions.
+</ParamField>
+
+<ParamField path="channel_dim" type="size_t" required>
+  Index of the channel dimension.
+</ParamField>
+
+<ParamField path="dims" type="const size_t*" required>
+  Array of `num_dims` dimension sizes.
+</ParamField>
+
+---
+
+## Example
+
+```c
+#include <xnnpack.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+int main(void) {
+  xnn_initialize(NULL);
+
+  // Reserve 2 external IDs: 0 = input, 1 = output.
+  xnn_subgraph_t subgraph = NULL;
+  xnn_create_subgraph(2, 0, &subgraph);
+
+  // --- FP32 external input tensor [1, 4] ---
+  size_t input_dims[] = {1, 4};
+  uint32_t input_id = XNN_INVALID_VALUE_ID;
+  xnn_define_tensor_value(
+    subgraph, xnn_datatype_fp32,
+    2, input_dims,
+    /*data=*/NULL,
+    /*external_id=*/0,
+    XNN_VALUE_FLAG_EXTERNAL_INPUT,
+    &input_id);
+
+  // --- Static quantized weight tensor: per-channel qint8 [8, 4] ---
+  // Allocate weight data with XNN_EXTRA_BYTES padding.
+  size_t weight_nelems = 8 * 4;
+  int8_t* weights = calloc(weight_nelems + XNN_EXTRA_BYTES, 1);
+
+  // Allocate per-channel scales with XNN_EXTRA_QUANTIZATION_PARAMS padding.
+  float scales[8 + XNN_EXTRA_QUANTIZATION_PARAMS];
+  for (int i = 0; i < 8; i++) scales[i] = 0.01f;
+
+  size_t weight_dims[] = {8, 4};
+  uint32_t weight_id = XNN_INVALID_VALUE_ID;
+  xnn_define_channelwise_quantized_tensor_value(
+    subgraph, xnn_datatype_qcint8,
+    scales,
+    /*num_dims=*/2,
+    /*channel_dim=*/0,  // output channels are dim 0
+    weight_dims,
+    weights,
+    XNN_INVALID_VALUE_ID, 0,
+    &weight_id);
+
+  // --- FP32 external output tensor [1, 8] ---
+  size_t output_dims[] = {1, 8};
+  uint32_t output_id = XNN_INVALID_VALUE_ID;
+  xnn_define_tensor_value(
+    subgraph, xnn_datatype_fp32,
+    2, output_dims,
+    /*data=*/NULL,
+    /*external_id=*/1,
+    XNN_VALUE_FLAG_EXTERNAL_OUTPUT,
+    &output_id);
+
+  // ... define operator Nodes using input_id, weight_id, output_id ...
+
+  xnn_delete_subgraph(subgraph);
+  free(weights);
+  xnn_deinitialize();
+  return 0;
+}
+```

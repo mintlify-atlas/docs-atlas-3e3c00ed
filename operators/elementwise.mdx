@@ -1,0 +1,401 @@
+---
+title: "Elementwise operators"
+description: "Unary and binary elementwise operations in XNNPACK, including activations, arithmetic, and broadcasting."
+---
+
+XNNPACK provides a unified API for elementwise operations through `xnn_define_unary` and `xnn_define_binary`. Many older per-operator functions exist but are marked `XNN_DEPRECATED`; new code should use the unified API.
+
+## Unified unary API
+
+```c
+enum xnn_status xnn_define_unary(
+  xnn_subgraph_t subgraph,
+  enum xnn_unary_operator type,
+  const union xnn_unary_params* params,
+  uint32_t input_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+<ParamField path="type" type="enum xnn_unary_operator" required>
+  The unary operator to apply. See the operator table below.
+</ParamField>
+
+<ParamField path="params" type="const union xnn_unary_params*" required>
+  Operator-specific parameters. Pass `NULL` for operators that require no parameters.
+</ParamField>
+
+<ParamField path="input_id" type="uint32_t" required>
+  Value ID of the input tensor. The output tensor shape must match the input tensor shape.
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID of the output tensor.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Bitmask of operator flags. No flags are currently defined for unary operators.
+</ParamField>
+
+### Unary operator params
+
+```c
+union xnn_unary_params {
+  struct {
+    float min;  // lower bound for clipping (Clamp)
+    float max;  // upper bound for clipping (Clamp)
+  } clamp;
+  struct {
+    float alpha;  // scale factor for negative inputs (ELU)
+  } elu;
+  struct {
+    float negative_slope;  // scale factor for negative inputs (Leaky ReLU)
+  } leaky_relu;
+};
+```
+
+---
+
+## Unary operators
+
+### Abs
+
+Computes the absolute value of each element: `output = |input|`.
+
+```c
+xnn_define_unary(subgraph, xnn_unary_abs, NULL, input_id, output_id, 0);
+```
+
+### Bankers' rounding
+
+Rounds each element to the nearest integer, with ties rounded to even.
+
+```c
+xnn_define_unary(subgraph, xnn_unary_bankers_rounding, NULL, input_id, output_id, 0);
+```
+
+### Ceiling
+
+Rounds each element up to the nearest integer.
+
+```c
+xnn_define_unary(subgraph, xnn_unary_ceiling, NULL, input_id, output_id, 0);
+```
+
+### Clamp / ReLU / ReLU6
+
+Clips each element to `[min, max]`. By setting `min = 0` you get ReLU; setting `min = 0, max = 6` gives ReLU6.
+
+```c
+union xnn_unary_params params = {
+  .clamp = { .min = 0.0f, .max = 6.0f }  // ReLU6
+};
+xnn_define_unary(subgraph, xnn_unary_clamp, &params, input_id, output_id, 0);
+```
+
+### Convert
+
+Converts between data types, including fixed-point quantization and dequantization, and half-precision (FP16) conversion.
+
+```c
+xnn_define_unary(subgraph, xnn_unary_convert, NULL, input_id, output_id, 0);
+```
+
+<Info>
+The source and destination data types are determined by the datatypes of the input and output tensors as defined in the subgraph.
+</Info>
+
+### ELU
+
+Exponential Linear Unit: `output = x` if `x ≥ 0`, else `output = alpha * (exp(x) - 1)`.
+
+```c
+union xnn_unary_params params = {
+  .elu = { .alpha = 1.0f }
+};
+xnn_define_unary(subgraph, xnn_unary_elu, &params, input_id, output_id, 0);
+```
+
+### Floor
+
+Rounds each element down to the nearest integer.
+
+```c
+xnn_define_unary(subgraph, xnn_unary_floor, NULL, input_id, output_id, 0);
+```
+
+### GELU
+
+Gaussian Error Linear Unit. XNNPACK provides both an exact variant (`xnn_unary_gelu`) and an approximation that matches common frameworks (`xnn_unary_approxgelu`).
+
+```c
+xnn_define_unary(subgraph, xnn_unary_gelu, NULL, input_id, output_id, 0);
+```
+
+### HardSwish
+
+Computes `x * ReLU6(x + 3) / 6`.
+
+```c
+xnn_define_unary(subgraph, xnn_unary_hardswish, NULL, input_id, output_id, 0);
+```
+
+### Leaky ReLU
+
+`output = x` if `x ≥ 0`, else `output = negative_slope * x`.
+
+```c
+union xnn_unary_params params = {
+  .leaky_relu = { .negative_slope = 0.01f }
+};
+xnn_define_unary(subgraph, xnn_unary_leaky_relu, &params, input_id, output_id, 0);
+```
+
+### Negate
+
+Computes the elementwise negation: `output = -input`.
+
+```c
+xnn_define_unary(subgraph, xnn_unary_negate, NULL, input_id, output_id, 0);
+```
+
+### Sigmoid
+
+Computes `output = 1 / (1 + exp(-input))`.
+
+```c
+xnn_define_unary(subgraph, xnn_unary_sigmoid, NULL, input_id, output_id, 0);
+```
+
+### Softmax
+
+Computes normalised exponentials across the last dimension of the input tensor. Use the dedicated `xnn_define_softmax` function (not `xnn_define_unary`).
+
+```c
+enum xnn_status xnn_define_softmax(
+  xnn_subgraph_t subgraph,
+  uint32_t input_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+The input tensor must have at least one dimension. The output tensor must have the same shape as the input. Internally, XNNPACK uses the numerically stable two-pass algorithm described in [Dukhan & Ablavatski (2020)](https://arxiv.org/abs/2001.04438).
+
+```c
+xnn_define_softmax(subgraph, input_id, output_id, /*flags=*/0);
+```
+
+### Square
+
+Computes `output = input²`.
+
+```c
+xnn_define_unary(subgraph, xnn_unary_square, NULL, input_id, output_id, 0);
+```
+
+### Square Root
+
+Computes `output = √input`.
+
+```c
+xnn_define_unary(subgraph, xnn_unary_square_root, NULL, input_id, output_id, 0);
+```
+
+### Reciprocal Square Root
+
+Computes `output = 1 / √input`.
+
+```c
+xnn_define_unary(subgraph, xnn_unary_reciprocal_square_root, NULL, input_id, output_id, 0);
+```
+
+### Tanh
+
+Computes the hyperbolic tangent: `output = tanh(input)`.
+
+```c
+xnn_define_unary(subgraph, xnn_unary_tanh, NULL, input_id, output_id, 0);
+```
+
+### Truncation
+
+Rounds each element towards zero (truncates the fractional part).
+
+```c
+// No dedicated xnn_unary_truncation enum value; use xnn_define_unary with
+// the appropriate type when available, or use the deprecated xnn_define_* API.
+```
+
+### PReLU
+
+Parametric ReLU applies a learnable per-channel slope to negative inputs. The slope tensor has either `[1]` or `[channels]` dimensions.
+
+```c
+// PReLU uses the deprecated per-operator API:
+xnn_define_prelu(subgraph, input_id, slope_id, output_id, /*flags=*/0);
+```
+
+---
+
+## Unified binary API
+
+```c
+enum xnn_status xnn_define_binary(
+  xnn_subgraph_t subgraph,
+  enum xnn_binary_operator type,
+  const struct xnn_binary_params* params,
+  uint32_t input1_id,
+  uint32_t input2_id,
+  uint32_t output_id,
+  uint32_t flags);
+```
+
+<ParamField path="type" type="enum xnn_binary_operator" required>
+  The binary operator to apply.
+</ParamField>
+
+<ParamField path="params" type="const struct xnn_binary_params*">
+  Optional output clamping parameters. Pass `NULL` to disable clamping.
+
+  ```c
+  struct xnn_binary_params {
+    double output_min;  // lower bound for clamping
+    double output_max;  // upper bound for clamping
+  };
+  ```
+</ParamField>
+
+<ParamField path="input1_id" type="uint32_t" required>
+  Value ID for the first input tensor (N-dimensional).
+</ParamField>
+
+<ParamField path="input2_id" type="uint32_t" required>
+  Value ID for the second input tensor (M-dimensional).
+</ParamField>
+
+<ParamField path="output_id" type="uint32_t" required>
+  Value ID for the output tensor (`max(N,M)`-dimensional). Each dimension equals the maximum of the corresponding dimensions of the two inputs.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Supported flag: `XNN_FLAG_NO_BROADCAST` — asserts that no broadcasting is required.
+</ParamField>
+
+### Broadcasting rules
+
+Binary operators follow NumPy broadcasting rules. A dimension of size `1` in either input is broadcast to match the corresponding dimension of the other input.
+
+---
+
+## Binary operators
+
+### Add
+
+Elementwise addition of two tensors.
+
+```c
+xnn_define_binary(subgraph, xnn_binary_add, NULL, input1_id, input2_id, output_id, 0);
+```
+
+### Subtract
+
+Elementwise subtraction: `output = input1 - input2`.
+
+```c
+xnn_define_binary(subgraph, xnn_binary_subtract, NULL, input1_id, input2_id, output_id, 0);
+```
+
+### Multiply
+
+Elementwise multiplication: `output = input1 * input2`.
+
+```c
+xnn_define_binary(subgraph, xnn_binary_multiply, NULL, input1_id, input2_id, output_id, 0);
+```
+
+### Divide
+
+Elementwise division: `output = input1 / input2`.
+
+```c
+xnn_define_binary(subgraph, xnn_binary_divide, NULL, input1_id, input2_id, output_id, 0);
+```
+
+### Maximum
+
+Elementwise maximum: `output = max(input1, input2)`.
+
+```c
+xnn_define_binary(subgraph, xnn_binary_maximum, NULL, input1_id, input2_id, output_id, 0);
+```
+
+### Minimum
+
+Elementwise minimum: `output = min(input1, input2)`.
+
+```c
+xnn_define_binary(subgraph, xnn_binary_minimum, NULL, input1_id, input2_id, output_id, 0);
+```
+
+### Squared Difference
+
+Elementwise `(input1 - input2)²`.
+
+```c
+xnn_define_binary(subgraph, xnn_binary_squared_difference, NULL, input1_id, input2_id, output_id, 0);
+```
+
+### Copy Sign
+
+Copies the sign of `input2` into the magnitude of `input1`.
+
+```c
+xnn_define_binary(subgraph, xnn_binary_copysign, NULL, input1_id, input2_id, output_id, 0);
+```
+
+---
+
+## Output clamping
+
+Binary operators that accept `xnn_binary_params` support clamping the output to a `[output_min, output_max]` range in a single fused pass, at no additional cost.
+
+```c
+struct xnn_binary_params params = {
+  .output_min = 0.0,
+  .output_max = 6.0
+};
+// Fused Add + ReLU6
+xnn_define_binary(subgraph, xnn_binary_add, &params, input1_id, input2_id, output_id, 0);
+```
+
+<Tip>
+Fusing an activation clamp with a binary op avoids an extra memory round-trip and is always preferred over adding a separate Clamp node.
+</Tip>
+
+---
+
+## Complete unary operator table
+
+| Enum value | Operation | Params required |
+|---|---|---|
+| `xnn_unary_abs` | Absolute value | No |
+| `xnn_unary_approxgelu` | Approximate GELU | No |
+| `xnn_unary_bankers_rounding` | Round-half-to-even | No |
+| `xnn_unary_ceiling` | Ceiling | No |
+| `xnn_unary_clamp` | Clamp to `[min, max]` | Yes (`clamp`) |
+| `xnn_unary_convert` | Data type conversion | No |
+| `xnn_unary_cosine` | Cosine | No |
+| `xnn_unary_elu` | ELU | Yes (`elu.alpha`) |
+| `xnn_unary_exp` | Natural exponential | No |
+| `xnn_unary_floor` | Floor | No |
+| `xnn_unary_gelu` | Exact GELU | No |
+| `xnn_unary_hardswish` | HardSwish | No |
+| `xnn_unary_leaky_relu` | Leaky ReLU | Yes (`leaky_relu.negative_slope`) |
+| `xnn_unary_log` | Natural logarithm | No |
+| `xnn_unary_negate` | Negation | No |
+| `xnn_unary_reciprocal_square_root` | `1 / √x` | No |
+| `xnn_unary_sigmoid` | Sigmoid | No |
+| `xnn_unary_sine` | Sine | No |
+| `xnn_unary_square_root` | Square root | No |
+| `xnn_unary_square` | `x²` | No |
+| `xnn_unary_tanh` | Hyperbolic tangent | No |
